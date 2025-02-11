@@ -94,6 +94,10 @@ copy_files() {
   yq eval -i ".spec.aws.secretAccessKey = \"$KKP_PRESET_AWS_SECRETACCESSKEY\"" "$LOCAL_FILES_DIR/preset.yaml"
   yq eval -i ".spec.aws.vpcID = \"$KKP_PRESET_AWS_VPCID\"" "$LOCAL_FILES_DIR/preset.yaml"
 
+  cp "$LOCAL_FILES_DIR/seed-mla-tpl.values.yaml" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
+  yq eval -i ".prometheus.host = \"$KKP_HOST\"" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
+  yq eval -i ".alertmanager.host = \"$KKP_HOST\"" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
+
   echo "Copying setup script files to EC2..."
   scp -i "$KEY_PATH" -r "$LOCAL_FILES_DIR"/* "$AWS_HOST:$REMOTE_DIR"
   if [ $? -eq 0 ]; then

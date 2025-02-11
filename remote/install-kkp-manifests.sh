@@ -11,6 +11,10 @@ echo "==> EMAIL: $KKP_EMAIL"
 
 set -e
 
+sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+sudo chmod a+x /usr/local/bin/yq
+yq --version
+
 KKP_DIR="$HOME/kkp"
 mkdir -p $KKP_DIR
 mkdir -p $KKP_DIR/values
@@ -85,10 +89,16 @@ echo "==> Installing KKP Seed cluster"
 echo ""
 
 kubermatic-installer convert-kubeconfig "$KUBECONFIG" > "$HOME"/kubeconfig-seed
-encodedSeedKubeconfig=$(base64 -w0 my-kubeconfig-file)
+encodedSeedKubeconfig=$(base64 -w0 kubeconfig-seed)
+mv $HOME/seed.yaml $KKP_DIR/seed.yaml
 sed -i 's/<base64 encoded kubeconfig>/'$encodedSeedKubeconfig'/g' $KKP_DIR/seed.yaml
 kubectl apply -f $KKP_DIR/seed.yaml
 
+
+ACCESS_KEY=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+SECRET_KEY=$(openssl rand -base64 32 | tr -dc 'a-zA-Z0-9' | head -c 32)
+
+yq eval -i '.minio.credentials.accessKey = "'$ACCESS_KEY'" | .minio.credentials.secretKey = "'$SECRET_KEY'"' $KKP_DIR/values/values.yaml
 
 echo "==> Installing KKP Seed cluster dependencies"
 kubermatic-installer deploy kubermatic-seed \
@@ -102,3 +112,44 @@ mv "$HOME"/preset.yaml $KKP_DIR
 kubectl apply -f "$KKP_DIR"/preset.yaml
 echo "==> KKP seed cluster must be added. Ensure that DNS settings are up-to-date in the AWS"
 
+sed -i 's/<host>/burak.sekili@kubermatic.com/g' seed-mla.values.yaml
+kubermatic-installer deploy seed-mla \
+  --kubeconfig "$KUBECONFIG" \
+  --charts-directory "$KKP_DIR/charts" \
+  --config "$KKP_DIR"/values/kubermatic.yaml \
+  --helm-values seed-mla.yaml
+  --verbose
+
+mv seed-mla.values.yaml $KKP_DIR
+
+grafanaRandomKeyForDex=$(cat /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32)
+yq eval -i '.dex.clients += {"id": "grafana", "name": "Grafana", "secret": "'$grafanaRandomKeyForDex'", "RedirectURIs": ["https://grafana." + env(KKP_HOST)]}' $KKP_DIR/values/values.yaml
+
+iapRandomKey=$(cat /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32)
+cat << EOF >> $KKP_DIR/values/values.yaml
+iap:
+  oidc_issuer_url: https://$KKP_HOST/dex
+  deployments:
+    grafana:
+      name: grafana
+      client_id: grafana
+      client_secret: "$grafanaRandomKeyForDex"
+      encryption_key: "$iapRandomKey" # created via `cat /dev/urandom | tr -dc A-Za-z0-9 | head -c32`
+      config:
+        scope: "groups openid email"
+        email_domains:
+          - "*"
+        skip_auth_regex:
+          - "/api/health"
+        pass_user_headers: true
+      upstream_service: grafana.monitoring.svc.cluster.local
+      upstream_port: 3000
+      ingress:
+        host: "grafana.$KKP_HOST"
+        annotations: {}
+EOF
+
+echo "=======> upgrading oauth"
+helm --namespace oauth upgrade --install --wait --atomic --values $KKP_DIR/values/values.yaml oauth $KKP_DIR/charts/oauth
+echo "=======> upgrading/installing IAP"
+helm --namespace iap upgrade --install --create-namespace --wait --atomic --values $KKP_DIR/values/values.yaml iap $KKP_DIR/charts/iap 

@@ -1,0 +1,19 @@
+prometheus:
+  host: prometheus.<host>
+  storageSize: '20Gi'
+  tsdb:
+    retentionTime: '5d'
+
+alertmanager:
+  host: alertmanager.<host>
+
+grafana:
+  user: admin
+  password: admin
+  provisioning:
+    configuration:
+      disable_login_form: false
+
+loki:
+  persistence:
+    size: '20Gi'
