@@ -1,2 +1,3 @@
 .k8c-creds.env
 kubeconfig*
+preset.yaml
