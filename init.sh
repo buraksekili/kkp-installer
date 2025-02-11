@@ -86,6 +86,14 @@ check_ssh_connection() {
 }
 
 copy_files() {
+  echo "setting up preset CR" 
+
+  cp "$LOCAL_FILES_DIR/preset-tpl.yaml" "$LOCAL_FILES_DIR/preset.yaml"
+  yq eval -i ".spec.aws.accessKeyID = \"$KKP_PRESET_AWS_ACCESSKEYID\"" "$LOCAL_FILES_DIR/preset.yaml"
+  yq eval -i ".spec.aws.datacenter = \"$KKP_PRESET_AWS_DATACENTER\"" "$LOCAL_FILES_DIR/preset.yaml"
+  yq eval -i ".spec.aws.secretAccessKey = \"$KKP_PRESET_AWS_SECRETACCESSKEY\"" "$LOCAL_FILES_DIR/preset.yaml"
+  yq eval -i ".spec.aws.vpcID = \"$KKP_PRESET_AWS_VPCID\"" "$LOCAL_FILES_DIR/preset.yaml"
+
   echo "Copying setup script files to EC2..."
   scp -i "$KEY_PATH" -r "$LOCAL_FILES_DIR"/* "$AWS_HOST:$REMOTE_DIR"
   if [ $? -eq 0 ]; then
