@@ -78,4 +78,27 @@ kubermatic-installer deploy \
 
 kubectl apply -f $KKP_DIR/cluster-issuer.yaml
 
-echo "==> KKP should be installed, wait for pods in kubermatic namespace to be ready"
+echo "==> KKP master should be installed, wait for pods in kubermatic namespace to be ready"
+echo ""
+echo "==> ***************************"
+echo "==> Installing KKP Seed cluster"
+echo ""
+
+kubermatic-installer convert-kubeconfig "$KUBECONFIG" > "$HOME"/kubeconfig-seed
+encodedSeedKubeconfig=$(base64 -w0 my-kubeconfig-file)
+sed -i 's/<base64 encoded kubeconfig>/'$encodedSeedKubeconfig'/g' $KKP_DIR/seed.yaml
+kubectl apply -f $KKP_DIR/seed.yaml
+
+
+echo "==> Installing KKP Seed cluster dependencies"
+kubermatic-installer deploy kubermatic-seed \
+  --kubeconfig "$KUBECONFIG" \
+  --charts-directory "$KKP_DIR/charts" \
+  --config "$KKP_DIR"/values/kubermatic.yaml \
+  --helm-values "$KKP_DIR"/values/values.yaml \
+  --verbose
+
+mv "$HOME"/preset.yaml $KKP_DIR
+kubectl apply -f "$KKP_DIR"/preset.yaml
+echo "==> KKP seed cluster must be added. Ensure that DNS settings are up-to-date in the AWS"
+
