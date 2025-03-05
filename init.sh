@@ -57,14 +57,14 @@ get_kubeconfig_from_kkp() {
   if [ $? -ne 0 ]; then
     echo "Error: Failed to send HTTP request to fetch kubeconfig from kkp"
     rm "$output_file"
-    return 1
+    exit 1
   fi
 
   if [ "$response" -ne 200 ]; then
     echo "Error: HTTP request failed with status code: $response"
     cat "$output_file"
     rm "$output_file"
-    return 1
+     exit 1
   fi
 
   echo "Successfully saved user cluster's kubeconfig response to $output_file"
