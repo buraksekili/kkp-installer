@@ -72,6 +72,11 @@ mv ./kubeconfig-usercluster $KUBECONFIG
 
 curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 
+
+yq eval -i '.dex.replicas = 1' $KKP_DIR/values/values.yaml
+yq eval -i '.dex.resources.requests.cpu = "75m"' $KKP_DIR/values/values.yaml
+yq eval -i '.minio.storageClass = "'kubermatic-fast'" | .minio.storageSize = "'10Gi'"' $KKP_DIR/values/values.yaml
+
 echo "==> starting to install KKP"
 kubermatic-installer deploy \
   --config "$KKP_DIR"/values/kubermatic.yaml \
@@ -108,48 +113,49 @@ kubermatic-installer deploy kubermatic-seed \
   --helm-values "$KKP_DIR"/values/values.yaml \
   --verbose
 
-mv "$HOME"/preset.yaml $KKP_DIR
+mv $HOME/preset.yaml $KKP_DIR
 kubectl apply -f "$KKP_DIR"/preset.yaml
+
 echo "==> KKP seed cluster must be added. Ensure that DNS settings are up-to-date in the AWS"
 
-sed -i 's/<host>/burak.sekili@kubermatic.com/g' seed-mla.values.yaml
-kubermatic-installer deploy seed-mla \
-  --kubeconfig "$KUBECONFIG" \
-  --charts-directory "$KKP_DIR/charts" \
-  --config "$KKP_DIR"/values/kubermatic.yaml \
-  --helm-values seed-mla.yaml
-  --verbose
+# sed -i 's/<host>/burak.sekili@kubermatic.com/g' seed-mla.values.yaml
+# kubermatic-installer deploy seed-mla \
+#   --kubeconfig "$KUBECONFIG" \
+#   --charts-directory "$KKP_DIR/charts" \
+#   --config "$KKP_DIR"/values/kubermatic.yaml \
+#   --helm-values seed-mla.yaml
+#   --verbose
 
-mv seed-mla.values.yaml $KKP_DIR
+# mv seed-mla.values.yaml $KKP_DIR
 
-grafanaRandomKeyForDex=$(cat /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32)
-yq eval -i '.dex.clients += {"id": "grafana", "name": "Grafana", "secret": "'$grafanaRandomKeyForDex'", "RedirectURIs": ["https://grafana." + env(KKP_HOST)]}' $KKP_DIR/values/values.yaml
+# grafanaRandomKeyForDex=$(cat /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32)
+# yq eval -i '.dex.clients += {"id": "grafana", "name": "Grafana", "secret": "'$grafanaRandomKeyForDex'", "RedirectURIs": ["https://grafana." + env(KKP_HOST)]}' $KKP_DIR/values/values.yaml
 
-iapRandomKey=$(cat /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32)
-cat << EOF >> $KKP_DIR/values/values.yaml
-iap:
-  oidc_issuer_url: https://$KKP_HOST/dex
-  deployments:
-    grafana:
-      name: grafana
-      client_id: grafana
-      client_secret: "$grafanaRandomKeyForDex"
-      encryption_key: "$iapRandomKey" # created via `cat /dev/urandom | tr -dc A-Za-z0-9 | head -c32`
-      config:
-        scope: "groups openid email"
-        email_domains:
-          - "*"
-        skip_auth_regex:
-          - "/api/health"
-        pass_user_headers: true
-      upstream_service: grafana.monitoring.svc.cluster.local
-      upstream_port: 3000
-      ingress:
-        host: "grafana.$KKP_HOST"
-        annotations: {}
-EOF
+# iapRandomKey=$(cat /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32)
+# cat << EOF >> $KKP_DIR/values/values.yaml
+# iap:
+#   oidc_issuer_url: https://$KKP_HOST/dex
+#   deployments:
+#     grafana:
+#       name: grafana
+#       client_id: grafana
+#       client_secret: "$grafanaRandomKeyForDex"
+#       encryption_key: "$iapRandomKey" # created via `cat /dev/urandom | tr -dc A-Za-z0-9 | head -c32`
+#       config:
+#         scope: "groups openid email"
+#         email_domains:
+#           - "*"
+#         skip_auth_regex:
+#           - "/api/health"
+#         pass_user_headers: true
+#       upstream_service: grafana.monitoring.svc.cluster.local
+#       upstream_port: 3000
+#       ingress:
+#         host: "grafana.$KKP_HOST"
+#         annotations: {}
+# EOF
 
-echo "=======> upgrading oauth"
-helm --namespace oauth upgrade --install --wait --atomic --values $KKP_DIR/values/values.yaml oauth $KKP_DIR/charts/oauth
-echo "=======> upgrading/installing IAP"
-helm --namespace iap upgrade --install --create-namespace --wait --atomic --values $KKP_DIR/values/values.yaml iap $KKP_DIR/charts/iap 
+# echo "=======> upgrading oauth"
+# helm --namespace oauth upgrade --install --wait --atomic --values $KKP_DIR/values/values.yaml oauth $KKP_DIR/charts/oauth
+# echo "=======> upgrading/installing IAP"
+# helm --namespace iap upgrade --install --create-namespace --wait --atomic --values $KKP_DIR/values/values.yaml iap $KKP_DIR/charts/iap 
