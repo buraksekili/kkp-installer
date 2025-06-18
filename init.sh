@@ -1,8 +1,11 @@
 #!/bin/bash
 
+source utils.sh
+
 KEY_PATH="$HOME/.ssh/kkp-cluster"
 LOCAL_FILES_DIR="$(dirname $0)/remote"
-REMOTE_DIR="/home/ubuntu"
+REMOTE_DIR=${REMOTE_DIR:-"/home/ubuntu"}
+AWS_HOST_USERNAME=${AWS_HOST_USERNAME:-"ubuntu"}
 
 declare -a required_secrets=(
   "K8C_PROJECT_ID"
@@ -17,10 +20,14 @@ declare -a required_secrets=(
 
 validate_creds_file() {
   k8sCreds=${K8C_CREDS:-".k8c-creds.env"}
-  echo "will use credentials in '$k8sCreds'"
+
+  log "Validating credentials in $k8sCreds file.
+  You can set \$K8C_CREDS to a different file if you want to use a different file.
+  For example:
+    \$K8C_CREDS=./k8c-creds.env ./init.sh"
+
   if [ ! -f "$k8sCreds" ]; then
-    echo "Error: Secrets file not found at $k8sCreds"
-    echo "Please copy secrets.template.env to $k8sCreds and fill in the values"
+    error "Secrets file not found at $k8sCreds. Please copy secrets.template.env to $k8sCreds and fill in the values"
     exit 1
   fi
 
@@ -29,7 +36,7 @@ validate_creds_file() {
   missing_secrets=0
   for secret in "${required_secrets[@]}"; do
     if [ -z "${!secret}" ]; then
-      echo "Error: $secret is not set in $k8sCreds"
+      error "$secret is not set in $k8sCreds"
       missing_secrets=1
     fi
   done
@@ -38,7 +45,7 @@ validate_creds_file() {
     exit 1
   fi
 
-  echo "done"
+  log "Secrets file is valid, the script will use the credentials in '$k8sCreds' file"
 }
 
 get_kubeconfig_from_kkp() {
@@ -47,6 +54,9 @@ get_kubeconfig_from_kkp() {
   local k8cHost=$K8C_HOST
   local k8cAuthKey=$K8C_AUTH
   local output_file="$LOCAL_FILES_DIR/kubeconfig-usercluster"
+
+  kubectl --kubeconfig /Users/buraksekili/Downloads/qa.txt get secrets -n cluster-${k8cClusterId} admin-kubeconfig -o jsonpath={.data.kubeconfig} | base64 -d >$output_file
+  return 0
 
   response=$(curl -s -w "%{http_code}" \
     -o "$output_file" \
@@ -64,7 +74,7 @@ get_kubeconfig_from_kkp() {
     echo "Error: HTTP request failed with status code: $response"
     cat "$output_file"
     rm "$output_file"
-     exit 1
+    exit 1
   fi
 
   echo "Successfully saved user cluster's kubeconfig response to $output_file"
@@ -72,21 +82,15 @@ get_kubeconfig_from_kkp() {
 }
 
 check_ssh_connection() {
-  echo "checking SSH connection:"
-  echo "    AWS_HOST: ${AWS_HOST}"
-  echo "    SSH_KEY_PATH: ${KEY_PATH}"
-
   if ssh -i "$KEY_PATH" -o ConnectTimeout=5 "$AWS_HOST" exit 2>/dev/null; then
-    echo "SSH connection successful"
     return 0
   else
-    echo "Failed to establish SSH connection"
     return 1
   fi
 }
 
 copy_files() {
-  echo "setting up preset CR" 
+  echo "setting up preset CR"
 
   cp "$LOCAL_FILES_DIR/preset-tpl.yaml" "$LOCAL_FILES_DIR/preset.yaml"
   yq eval -i ".spec.aws.accessKeyID = \"$KKP_PRESET_AWS_ACCESSKEYID\"" "$LOCAL_FILES_DIR/preset.yaml"
@@ -119,21 +123,71 @@ install_dependencies() {
     fi
   done
 
-echo "export string: $export_string"
+  echo "export string: $export_string"
   ssh -i "$KEY_PATH" "$AWS_HOST" "${export_string}bash -l $REMOTE_DIR/install-kkp-manifests.sh"
 }
 
 main() {
+  SKIP_CLUSTER_CREATION=${SKIP_CLUSTER_CREATION:-""}
+
+  log "Starting to install KKP within KKP, on dev cluster"
+
   validate_creds_file
 
-  export AWS_HOST="ubuntu@$AWS_IP"
+  # If SKIP_CLUSTER_CREATION is not set, create a cluster from the template
+  if [ -z "$SKIP_CLUSTER_CREATION" ]; then
+    log "SKIP_CLUSTER_CREATION is not set, creating a cluster from the template"
+    templateId=${K8C_CLUSTER_TEMPLATEID:-""}
+    if [ -z "$templateId" ]; then
+      error "K8C_CLUSTER_TEMPLATEID is not set. Ensure that the K8C_CLUSTER_TEMPLATEID environment variable is set"
+      exit 1
+    fi
 
-  echo "Starting EC2 setup..."
+    # Get the number of replicas from environment variable or default to 1
+    replicas=${K8C_CLUSTER_REPLICAS:-1}
+    log "Creating $replicas cluster(s) from template $templateId
+    If you want to use a different number of replicas, set the K8C_CLUSTER_REPLICAS environment variable."
+
+    # if ! create_cluster_from_template "$templateId" "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST" "$replicas"; then
+    #   error "Failed to create cluster from template"
+    #   exit 1
+    # fi
+
+    list_recently_created_clusters "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST"
+
+    success "Cluster(s) created successfully"
+
+    # Wait for nodes to have external IPs
+    log "Waiting for cluster nodes to be ready with external IPs..."
+    wait_timeout=${WAIT_TIMEOUT_MINUTES:-15}
+    if ! wait_for_nodes_external_ip "$K8C_PROJECT_ID" "$K8C_CLUSTER_ID" "$K8C_AUTH" "$K8C_HOST" "$wait_timeout"; then
+      error "Timed out waiting for cluster nodes to have external IPs"
+      exit 1
+    fi
+
+    success "Found node with external IP: $AWS_IP"
+  fi
+
+  exit 1
+
+  if [ -z "$AWS_HOST" ]; then
+    log "AWS_HOST environment variable is not set. Using default username $AWS_HOST_USERNAME and IP $AWS_IP"
+    export AWS_HOST="${AWS_HOST_USERNAME}@${AWS_IP}"
+  fi
+
+  log "AWS_HOST is being set to $AWS_HOST, trying to establish SSH connection..."
 
   if ! check_ssh_connection; then
-    echo "Error: Cannot establish SSH connection. Please check your AWS_HOST and KEY_PATH."
+    log "Cannot establish SSH connection. Please check the following:
+  1. SSH connectivity to the target host
+  2. KEY_PATH variable is correctly defined in the secrets file
+  3. AWS_IP variable is correctly defined in the secrets file
+  4. If you need to override the hostname, set the AWS_HOST variable while running the script"
+
     exit 1
   fi
+
+  success "SSH connection successful"
 
   echo "Fetching user cluster kubeconfig from kkp"
   get_kubeconfig_from_kkp
