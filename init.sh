@@ -49,44 +49,97 @@ validate_creds_file() {
 }
 
 get_kubeconfig_from_kkp() {
-  local k8cProjectId=$K8C_PROJECT_ID
-  local k8cClusterId=$K8C_CLUSTER_ID
-  local k8cHost=$K8C_HOST
-  local k8cAuthKey=$K8C_AUTH
-  local output_file="$LOCAL_FILES_DIR/kubeconfig-usercluster"
+  local project_id="${1:-$K8C_PROJECT_ID}"
+  local cluster_id="${2:-$K8C_CLUSTER_ID}"
+  local kkp_host="${3:-$K8C_HOST}"
+  local kkp_token="${4:-$K8C_AUTH}"
+  local output_file="${5:-$LOCAL_FILES_DIR/kubeconfig-usercluster}"
 
-  kubectl --kubeconfig /Users/buraksekili/Downloads/qa.txt get secrets -n cluster-${k8cClusterId} admin-kubeconfig -o jsonpath={.data.kubeconfig} | base64 -d >$output_file
-  return 0
+  if [ -z "$project_id" ] || [ -z "$cluster_id" ] || [ -z "$kkp_host" ] || [ -z "$kkp_token" ]; then
+    error "Missing required parameters for get_kubeconfig_from_kkp"
+    return 1
+  fi
 
-  response=$(curl -s -w "%{http_code}" \
-    -o "$output_file" \
-    -X GET "$k8cHost"/api/v2/projects/"$k8cProjectId"/clusters/"$k8cClusterId"/kubeconfig \
+  local output_dir=$(dirname "$output_file")
+  if [ ! -d "$output_dir" ]; then
+    log "Creating output directory: $output_dir"
+    mkdir -p "$output_dir"
+    if [ $? -ne 0 ]; then
+      error "Failed to create output directory: $output_dir"
+      return 1
+    fi
+  fi
+
+  log "Fetching kubeconfig for cluster $cluster_id from project $project_id"
+
+  local temp_file
+  temp_file=$(mktemp)
+  trap 'rm -f "$temp_file"' RETURN
+
+  local http_status
+  http_status=$(curl -s -w "%{http_code}" \
+    -o "$temp_file" \
+    -X GET "${kkp_host}/api/v2/projects/${project_id}/clusters/${cluster_id}/kubeconfig" \
     -H "accept: application/octet-stream" \
-    -H "Authorization: Bearer $k8cAuthKey")
+    -H "Authorization: Bearer $kkp_token" 2>/dev/null)
 
-  if [ $? -ne 0 ]; then
-    echo "Error: Failed to send HTTP request to fetch kubeconfig from kkp"
-    rm "$output_file"
-    exit 1
+  local curl_exit_code=$?
+
+  if [[ $curl_exit_code -ne 0 ]]; then
+    error "Failed to send HTTP request to fetch kubeconfig (curl exit code: $curl_exit_code)"
+    return 1
   fi
 
-  if [ "$response" -ne 200 ]; then
-    echo "Error: HTTP request failed with status code: $response"
-    cat "$output_file"
-    rm "$output_file"
-    exit 1
+  if [[ "$http_status" -ne 200 ]]; then
+    error "HTTP request failed with status code: $http_status"
+    if [[ -s "$temp_file" ]]; then
+      error "API response: $(cat "$temp_file")"
+    fi
+    return 1
   fi
 
-  echo "Successfully saved user cluster's kubeconfig response to $output_file"
+  if [[ ! -s "$temp_file" ]]; then
+    error "Downloaded kubeconfig file is empty"
+    return 1
+  fi
+
+  if ! grep -q "apiVersion\|kind.*Config" "$temp_file" 2>/dev/null; then
+    error "Downloaded file doesn't appear to be a valid kubeconfig"
+    return 1
+  fi
+
+  if ! mv "$temp_file" "$output_file"; then
+    error "Failed to save kubeconfig to $output_file"
+    return 1
+  fi
+
+  success "Successfully downloaded kubeconfig to $output_file"
+  log "Kubeconfig details:"
+  log "  Project ID: $project_id"
+  log "  Cluster ID: $cluster_id"
+  log "  Output file: $output_file"
+
   return 0
 }
 
 check_ssh_connection() {
-  if ssh -i "$KEY_PATH" -o ConnectTimeout=5 "$AWS_HOST" exit 2>/dev/null; then
-    return 0
-  else
-    return 1
-  fi
+  local max_retries=10
+  local retry_count=0
+
+  while true; do
+    if ssh -i "$KEY_PATH" -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$AWS_HOST" exit 2>/dev/null; then
+      return 0
+    else
+      log "SSH connection failed, retrying in 5 seconds..."
+      sleep 5
+    fi
+
+    retry_count=$((retry_count + 1))
+    if [ $retry_count -ge $max_retries ]; then
+      error "Failed to establish SSH connection after $max_retries retries"
+      return 1
+    fi
+  done
 }
 
 copy_files() {
@@ -124,7 +177,8 @@ install_dependencies() {
   done
 
   echo "export string: $export_string"
-  ssh -i "$KEY_PATH" "$AWS_HOST" "${export_string}bash -l $REMOTE_DIR/install-kkp-manifests.sh"
+  exit 1
+  # ssh -i "$KEY_PATH" "$AWS_HOST" "${export_string}bash -l $REMOTE_DIR/install-kkp-manifests.sh"
 }
 
 main() {
@@ -143,21 +197,21 @@ main() {
       exit 1
     fi
 
-    # Get the number of replicas from environment variable or default to 1
     replicas=${K8C_CLUSTER_REPLICAS:-1}
     log "Creating $replicas cluster(s) from template $templateId
     If you want to use a different number of replicas, set the K8C_CLUSTER_REPLICAS environment variable."
 
-    # if ! create_cluster_from_template "$templateId" "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST" "$replicas"; then
-    #   error "Failed to create cluster from template"
-    #   exit 1
-    # fi
+    if ! create_cluster_from_template "$templateId" "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST" "$replicas"; then
+      error "Failed to create cluster from template"
+      exit 1
+    fi
+
+    success "Cluster(s) created successfully"
+    log "Sleeping for 10 seconds to let the cluster settle..."
+    sleep 10
 
     list_recently_created_clusters "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST"
 
-    success "Cluster(s) created successfully"
-
-    # Wait for nodes to have external IPs
     log "Waiting for cluster nodes to be ready with external IPs..."
     wait_timeout=${WAIT_TIMEOUT_MINUTES:-15}
     if ! wait_for_nodes_external_ip "$K8C_PROJECT_ID" "$K8C_CLUSTER_ID" "$K8C_AUTH" "$K8C_HOST" "$wait_timeout"; then
@@ -168,11 +222,12 @@ main() {
     success "Found node with external IP: $AWS_IP"
   fi
 
-  exit 1
+  AWS_HOST=${AWS_HOST:-""}
 
   if [ -z "$AWS_HOST" ]; then
-    log "AWS_HOST environment variable is not set. Using default username $AWS_HOST_USERNAME and IP $AWS_IP"
     export AWS_HOST="${AWS_HOST_USERNAME}@${AWS_IP}"
+    log "AWS_HOST environment variable is not set. Using default username $AWS_HOST_USERNAME and IP $AWS_IP
+Host: $AWS_HOST"
   fi
 
   log "AWS_HOST is being set to $AWS_HOST, trying to establish SSH connection..."
@@ -190,7 +245,10 @@ main() {
   success "SSH connection successful"
 
   echo "Fetching user cluster kubeconfig from kkp"
-  get_kubeconfig_from_kkp
+  if ! get_kubeconfig_from_kkp; then
+    error "Failed to fetch kubeconfig from KKP"
+    exit 1
+  fi
 
   if ! copy_files; then
     echo "Error: Failed to copy files to EC2"

@@ -50,7 +50,6 @@ api_request() {
     local response_file
     response_file=$(mktemp)
 
-    # Ensure cleanup on function exit
     trap 'rm -f "$response_file"' RETURN
 
     args+=(-w "%{http_code}" -o "$response_file")
@@ -129,7 +128,6 @@ create_cluster_from_template() {
       "replicas": ($replicas | tonumber)
     }')
 
-    # Make the API call to create the cluster(s) from template
     if ! response=$(api_request "POST" "/api/v2/projects/$project_id/clustertemplates/$template_id/instances" "$payload" "$kkp_token"); then
         error "Failed to create cluster(s) from template via API"
         return 1
@@ -164,25 +162,21 @@ list_recently_created_clusters() {
 
     local response
 
-    # Make API call to list clusters in the project
     if ! response=$(api_request "GET" "/api/v2/projects/$project_id/clusters" "" "$kkp_token"); then
         error "Failed to list clusters via API"
         return 1
     fi
 
-    # Validate that the response is valid JSON
     if ! echo "$response" | jq . >/dev/null 2>&1; then
         error "API returned invalid JSON response: $response"
         return 1
     fi
 
-    # Sort clusters by creation timestamp (newest first)
     log "Recently created clusters:"
     echo "$response" | jq -r '.clusters | sort_by(.creationTimestamp) | reverse | .[] | "\(.id) - \(.name) - Created: \(.creationTimestamp)"' | head -n 10 | while read -r line; do
         log "  $line"
     done
 
-    # Store the most recently created cluster ID in the environment variable
     export K8C_CLUSTER_ID=$(echo "$response" | jq -r '.clusters | sort_by(.creationTimestamp) | reverse | .[0].id')
     log "Set K8C_CLUSTER_ID=$K8C_CLUSTER_ID for subsequent operations"
 }
@@ -199,8 +193,6 @@ wait_for_nodes_external_ip() {
         return 1
     fi
 
-    log "Waiting for cluster nodes to have external IP addresses (timeout: ${timeout_minutes} minutes)..."
-
     local start_time=$(date +%s)
     local timeout_seconds=$((timeout_minutes * 60))
     local end_time=$((start_time + timeout_seconds))
@@ -209,13 +201,11 @@ wait_for_nodes_external_ip() {
     while true; do
         current_time=$(date +%s)
 
-        # Check timeout
         if [ $current_time -gt $end_time ]; then
             error "Timeout reached while waiting for nodes to have external IPs"
             return 1
         fi
 
-        # Calculate elapsed and remaining time
         local elapsed_seconds=$((current_time - start_time))
         local elapsed_minutes=$((elapsed_seconds / 60))
         local elapsed_seconds_remainder=$((elapsed_seconds % 60))
@@ -224,22 +214,20 @@ wait_for_nodes_external_ip() {
 
         log "Checking nodes status (elapsed: ${elapsed_minutes}m ${elapsed_seconds_remainder}s, remaining: ${remaining_minutes}m)..."
 
-        # Get nodes
         local response
         if ! response=$(api_request "GET" "/api/v2/projects/${project_id}/clusters/${cluster_id}/nodes" "" "$kkp_token"); then
             log "Failed to get nodes, retrying in ${retry_interval}s..."
+            log "Response: $response"
             sleep $retry_interval
             continue
         fi
 
-        # Validate JSON
         if ! echo "$response" | jq . >/dev/null 2>&1; then
             log "Invalid JSON response, retrying in ${retry_interval}s..."
             sleep $retry_interval
             continue
         fi
 
-        # Check for nodes
         local node_count=$(echo "$response" | jq '. | length')
         if [ "$node_count" -eq 0 ]; then
             log "No nodes found yet, retrying in ${retry_interval}s..."
@@ -256,7 +244,6 @@ wait_for_nodes_external_ip() {
             local external_ip=$(echo "$response" | jq -r ".[$i].status.addresses[] | select(.type == \"ExternalIP\") | .address" 2>/dev/null)
 
             if [ -n "$external_ip" ]; then
-                # Set the global AWS_IP variable to the first external IP found
                 export AWS_IP="$external_ip"
                 log "Found external IP: $node_name ($external_ip)"
                 echo "Set AWS_IP=$AWS_IP"
