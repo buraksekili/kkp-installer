@@ -261,3 +261,136 @@ wait_for_nodes_external_ip() {
         sleep $retry_interval
     done
 }
+
+remove_yaml_scheduling_config() {
+    local target_file="$1"
+
+    if [ -z "$target_file" ]; then
+        error "remove_yaml_scheduling_config: target file parameter is required"
+        return 1
+    fi
+
+    if [ ! -f "$target_file" ]; then
+        error "remove_yaml_scheduling_config: file '$target_file' does not exist"
+        return 1
+    fi
+
+    log "Removing YAML scheduling configurations from $target_file"
+
+    # Remove YAML anchor and node scheduling configurations
+    sed -i '' '/^scheduleOnStableNodes:/d' "$target_file"
+    sed -i '' '/^  tolerations:/d' "$target_file"
+    sed -i '' '/^    - operator:/d' "$target_file"
+    sed -i '' '/^      key:/d' "$target_file"
+    sed -i '' '/^  nodeSelector:/d' "$target_file"
+    sed -i '' '/^    kubermatic.io\/stable:/d' "$target_file"
+    sed -i '' '/<<: \*scheduleOnStableNodes/d' "$target_file"
+
+    return 0
+}
+
+update_helm_master_file() {
+    local source_file="${1:-vault-files/helm-master.yaml}"
+    local expected_file="${2:-vault-files/helm-master-expected.yaml}"
+    local admin_password="${3:-${ADMIN_PASSWORD:-}}"
+    if [ -z "$admin_password" ]; then
+        error "Admin password is not set"
+        return 1
+    fi
+
+    if [ ! -f "$source_file" ]; then
+        error "Source file '$source_file' does not exist"
+        return 1
+    fi
+
+    local password_hash
+    if command -v htpasswd >/dev/null 2>&1; then
+        password_hash=$(htpasswd -bnBC 10 "" "$admin_password" | tr -d ':\n' | sed 's/$2y/$2a/')
+    else
+        error "htpasswd is not available for password hashing"
+        return 1
+    fi
+
+    log "Generated bcrypt hash for admin password"
+
+    if [ ! -f "$expected_file" ] || [ ! -s "$expected_file" ]; then
+        cp "$source_file" "$expected_file"
+    fi
+
+    local temp_file
+    temp_file=$(mktemp /tmp/helm-master-update.XXXXXX)
+    trap "rm -f \"$temp_file\" \"$temp_file.new\"" EXIT
+
+    cp "$source_file" "$temp_file"
+
+    if ! remove_yaml_scheduling_config "$temp_file"; then
+        error "Failed to remove YAML scheduling configurations"
+        return 1
+    fi
+
+    # Change dex replica count from 2 to 1
+    sed -i '' 's/replicaCount: 2/replicaCount: 1/g' "$temp_file"
+
+    # Replace specific hostnames with placeholders
+    sed -i '' 's/"dev\.kubermatic\.io"/<kkp_host>/g' "$temp_file"
+    sed -i '' 's/https:\/\/dev\.kubermatic\.io/https:\/\/<kkp_host>/g' "$temp_file"
+
+    # Remove authentication connectors section
+    awk '
+    BEGIN { skip = 0; }
+    /^    connectors:/ { skip = 1; next; }
+    /^    enablePasswordDB:/ { skip = 0; }
+    !skip { print $0; }
+    ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
+
+    # Update user accounts
+    awk -v password_hash="$password_hash" '
+    BEGIN { in_passwords = 0; printed = 0; }
+    /^    staticPasswords:/ { 
+        print "    staticPasswords:";
+        print "      - email: <admin_email>";
+        print "        hash: \"" password_hash "\"";
+        print "        username: admin";
+        print "        userID: 08a8684b-db88-4b73-90a9-3cd1661f5466";
+        in_passwords = 1;
+        printed = 1;
+        next;
+    }
+    /^    staticClients:/ { in_passwords = 0; print; next; }
+    in_passwords { next; } # Skip all lines in the passwords section
+    { print; } # Print all other lines
+    ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
+
+    awk '
+    BEGIN { in_clients = 0; client_count = 0; skip_until_next_section = 0; }
+    /^    staticClients:/ { in_clients = 1; print; next; }
+    /^telemetry:/ { in_clients = 0; skip_until_next_section = 0; print; next; }
+    
+    in_clients && /^      - id:/ {
+        client_count++;
+        if (client_count <= 2) {
+            print;
+            skip_until_next_section = 0;
+        } else {
+            skip_until_next_section = 1;
+            next;
+        }
+    }
+    
+    in_clients && /^        secret:/ && client_count <= 2 {
+        print "        secret: <dex_client_secret>";
+        next;
+    }
+    
+    skip_until_next_section { next; }
+    { print; }
+    ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
+
+    sed -i '' '/^cert-manager:/,/^$/d' "$temp_file"
+    sed -i '' '/^nginx:/,/^$/d' "$temp_file"
+
+    mv "$temp_file" "$source_file"
+
+    success "Updated $source_file based on the reference in $expected_file"
+    return 0
+}

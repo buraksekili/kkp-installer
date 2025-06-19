@@ -156,7 +156,9 @@ copy_files() {
   yq eval -i ".alertmanager.host = \"$KKP_HOST\"" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
 
   echo "Copying setup script files to EC2..."
-  scp -i "$KEY_PATH" -r "$LOCAL_FILES_DIR"/* "$AWS_HOST:$REMOTE_DIR"
+  # Copy all files from remote/ directory and utils.sh to remote host.
+  # These scripts will be used to install KKP on the remote host machine.
+  scp -i "$KEY_PATH" -r "$LOCAL_FILES_DIR"/* utils.sh "$AWS_HOST:$REMOTE_DIR"
   if [ $? -eq 0 ]; then
     echo "Files copied successfully"
     return 0
@@ -164,6 +166,61 @@ copy_files() {
     echo "Failed to copy files"
     return 1
   fi
+}
+
+generate_random_secret_key() {
+  local secret_key_file="$1"
+  if [ -z "$secret_key_file" ]; then
+    error "secret_key_file is not set"
+    return 1
+  fi
+
+  if [ -f "$secret_key_file" ] && [ -s "$secret_key_file" ]; then
+    log "Using existing random secret key from $secret_key_file"
+  else
+    log "Generating new random secret key..."
+
+    if command -v openssl >/dev/null 2>&1; then
+      openssl rand -base64 32 | tr -dc 'A-Za-z0-9' | head -c32 >"$secret_key_file"
+    else
+      head -c 24 /dev/urandom | base64 | tr -dc 'A-Za-z0-9' | head -c32 >"$secret_key_file"
+    fi
+
+    if [ $? -eq 0 ] && [ -s "$secret_key_file" ]; then
+      log "Random secret key generated and saved to $secret_key_file"
+    else
+      error "Failed to generate random secret key"
+      return 1
+    fi
+  fi
+}
+
+prepare_vault_files() {
+  log "Fetching files from vault. If you are not logged in to vault, please do so via 'vault login'"
+
+  local vault_files_dir="vault-files"
+  mkdir -p "$vault_files_dir"
+
+  vault kv get -field=presets.yaml "$VAULT_SECRET" >"$vault_files_dir/presets.yaml"
+  vault kv get -field=kubermatic.yaml "$VAULT_SECRET" >"$vault_files_dir/kubermatic.yaml"
+  vault kv get -field=helm-master.yaml "$VAULT_SECRET" >"$vault_files_dir/helm-master.yaml"
+
+  yq eval '.spec.featureGates.UserClusterMLA = false' -i "$vault_files_dir/kubermatic.yaml"
+  yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$vault_files_dir/kubermatic.yaml"
+  yq eval '.spec.ingress.domain = $KKP_HOST' -i "$vault_files_dir/kubermatic.yaml"
+
+  update_helm_master_file "$vault_files_dir/helm-master.yaml" "$vault_files_dir/helm-master-expected2.yaml"
+
+  vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$vault_files_dir/helm-seed-shared.yaml"
+  remove_yaml_scheduling_config "$vault_files_dir/helm-seed-shared.yaml"
+  yq eval '.minio.storeSize = "25Gi"' -i "$vault_files_dir/helm-seed-shared.yaml"
+
+  if ! generate_random_secret_key "$vault_files_dir/random-secret-key"; then
+    error "Failed to generate random secret key"
+    exit 1
+  fi
+
+  success "Vault files prepared successfully"
 }
 
 install_dependencies() {
@@ -187,6 +244,7 @@ main() {
   log "Starting to install KKP within KKP, on dev cluster"
 
   validate_creds_file
+  prepare_vault_files
 
   # If SKIP_CLUSTER_CREATION is not set, create a cluster from the template
   if [ -z "$SKIP_CLUSTER_CREATION" ]; then
