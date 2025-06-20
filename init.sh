@@ -47,7 +47,7 @@ validate_creds_file() {
 }
 
 check_cluster_match() {
-  if kubectl config get-clusters --no-headers 2>/dev/null | grep -q "^${K8C_CLUSTER_ID}$"; then
+  if kubectl config get-clusters 2>/dev/null | tail -n +2 | grep -q "^${K8C_CLUSTER_ID}$"; then
     log "✅ K8C_CLUSTER_ID matches kubectl config"
     return 0
   else
@@ -179,11 +179,13 @@ prepare_kkp_configs() {
   yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$KKP_FILES_DIR/kubermatic.yaml"
   yq eval '.spec.ingress.domain = "'$KKP_HOST'"' -i "$KKP_FILES_DIR/kubermatic.yaml"
 
+  # update helm master file
   if ! update_helm_master_file "$KKP_FILES_DIR/helm-master.yaml"; then
     error "Failed to update helm-master file"
     exit 1
   fi
 
+  # update seed manifest
   if ! remove_yaml_scheduling_config "$KKP_FILES_DIR/helm-seed-shared.yaml"; then
     error "Failed to remove YAML scheduling configurations"
     exit 1
@@ -201,9 +203,9 @@ install_kubermatic_installer() {
   log "Checking for kubermatic-installer availability..."
 
   if [[ -f "$KKP_FILES_DIR/kubermatic-installer" && -d "$KKP_FILES_DIR/charts" ]]; then
-    log "Found kubermatic-installer in remote-files directory"
+    log "Found kubermatic-installer in kkp-files directory"
     chmod +x "$KKP_FILES_DIR/kubermatic-installer"
-    success "Using kubermatic-installer from remote-files directory"
+    success "Using kubermatic-installer from kkp-files directory"
     export KUBERMATIC_BINARY="$KKP_FILES_DIR/kubermatic-installer"
     return 0
   fi

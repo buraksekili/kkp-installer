@@ -290,8 +290,9 @@ remove_yaml_scheduling_config() {
 }
 
 update_helm_master_file() {
-    local remote_files_dir="remote-files"
-    local source_file="${1:-${remote_files_dir}/helm-master.yaml}"
+    local source_file="$KKP_FILES_DIR/helm-master.yaml"
+    log "updating helm master file located at $source_file"
+
     local admin_password="${ADMIN_PASSWORD:-}"
     if [ -z "$admin_password" ]; then
         error "Admin password is not set"
@@ -303,7 +304,7 @@ update_helm_master_file() {
         return 1
     fi
 
-    local secret_key_file="${remote_files_dir}/random-secret-key"
+    local secret_key_file="${KKP_FILES_DIR}/random-secret-key"
     local dex_client_secret=""
     if [ -f "$secret_key_file" ]; then
         dex_client_secret=$(cat "$secret_key_file")
