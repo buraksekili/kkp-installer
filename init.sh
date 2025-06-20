@@ -158,42 +158,41 @@ generate_random_secret_key() {
 }
 
 prepare_kkp_configs() {
-  local remote_files_dir="remote-files"
-  log "Preparing KKP configs in $remote_files_dir, creating directory if it doesn't exist..."
-  mkdir -p "$remote_files_dir"
+  log "Preparing KKP configs in $KKP_FILES_DIR, creating directory if it doesn't exist..."
+  mkdir -p "$KKP_FILES_DIR"
 
   log "Generating random secret key for dex client secret..."
-  if ! generate_random_secret_key "$remote_files_dir/random-secret-key"; then
+  if ! generate_random_secret_key "$KKP_FILES_DIR/random-secret-key"; then
     error "Failed to generate random secret key"
     exit 1
   fi
 
   log "Fetching files from vault. If you are not logged in to vault, please do so via 'vault login'"
 
-  vault kv get -field=presets.yaml "$VAULT_SECRET" >"$remote_files_dir/presets.yaml"
-  vault kv get -field=kubermatic.yaml "$VAULT_SECRET" >"$remote_files_dir/kubermatic.yaml"
-  vault kv get -field=helm-master.yaml "$VAULT_SECRET" >"$remote_files_dir/helm-master.yaml"
-  vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$remote_files_dir/helm-seed-shared.yaml"
+  vault kv get -field=presets.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/presets.yaml"
+  vault kv get -field=kubermatic.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/kubermatic.yaml"
+  vault kv get -field=helm-master.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/helm-master.yaml"
+  vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/helm-seed-shared.yaml"
 
   # update KubermaticConfiguration
-  yq eval '.spec.featureGates.UserClusterMLA = false' -i "$remote_files_dir/kubermatic.yaml"
-  yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$remote_files_dir/kubermatic.yaml"
-  yq eval '.spec.ingress.domain = "'$KKP_HOST'"' -i "$remote_files_dir/kubermatic.yaml"
+  yq eval '.spec.featureGates.UserClusterMLA = false' -i "$KKP_FILES_DIR/kubermatic.yaml"
+  yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$KKP_FILES_DIR/kubermatic.yaml"
+  yq eval '.spec.ingress.domain = "'$KKP_HOST'"' -i "$KKP_FILES_DIR/kubermatic.yaml"
 
-  if ! update_helm_master_file "$remote_files_dir/helm-master.yaml"; then
+  if ! update_helm_master_file "$KKP_FILES_DIR/helm-master.yaml"; then
     error "Failed to update helm-master file"
     exit 1
   fi
 
-  if ! remove_yaml_scheduling_config "$remote_files_dir/helm-seed-shared.yaml"; then
+  if ! remove_yaml_scheduling_config "$KKP_FILES_DIR/helm-seed-shared.yaml"; then
     error "Failed to remove YAML scheduling configurations"
     exit 1
   fi
 
-  yq eval '.minio.storeSize = "25Gi"' -i "$remote_files_dir/helm-seed-shared.yaml"
+  yq eval '.minio.storeSize = "25Gi"' -i "$KKP_FILES_DIR/helm-seed-shared.yaml"
 
-  cp remote/cluster-issuer.yaml "$remote_files_dir"
-  yq eval '.spec.acme.email = "'$KKP_EMAIL'"' -i "$remote_files_dir/cluster-issuer.yaml"
+  cp remote/cluster-issuer.yaml "$KKP_FILES_DIR"
+  yq eval '.spec.acme.email = "'$KKP_EMAIL'"' -i "$KKP_FILES_DIR/cluster-issuer.yaml"
 
   success "Files prepared successfully"
 }
