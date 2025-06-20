@@ -1,32 +1,6 @@
 # KKP-within-KKP Deployment Script
 
-This repository contains scripts to deploy Kubermatic Kubernetes Platform (KKP) Community Edition within an existing KKP cluster, creating a nested KKP deployment.
-
-## What is KKP?
-
-Kubermatic Kubernetes Platform (KKP) is an enterprise-grade platform for managing Kubernetes clusters at scale. It provides automated cluster lifecycle management, multi-cloud support, and centralized cluster operations.
-
-## Purpose
-
-This project enables you to deploy a new KKP instance within a cluster managed by an existing KKP deployment. This nested approach is useful for:
-
-- **Development and Testing**: Create isolated KKP environments for testing new features
-- **Multi-tenancy**: Provide separate KKP instances for different teams or projects
-- **Staging Environments**: Set up production-like KKP environments for validation
-- **Training and Demos**: Create disposable KKP instances for educational purposes
-
-## Prerequisites
-
-Before running the installation script, ensure you have the following tools installed:
-
-- **kubectl**: Kubernetes command-line tool
-- **jq**: Command-line JSON processor
-- **yq**: Command-line YAML processor
-- **htpasswd**: For password hashing (usually part of Apache utils)
-- **openssl**: For generating random keys
-- **vault CLI**: If using Vault to fetch configuration files
-- **go**: Go programming language (for architecture detection)
-- **curl**: For downloading files
+Create a KKP master/shared cluster within an existing user cluster deployed in KKP!
 
 You'll also need:
 
@@ -34,33 +8,20 @@ You'll also need:
 - A valid KKP API token
 - A cluster template configured in your KKP project
 
+> Old branch can be found https://github.com/buraksekili/kkp-installer/tree/old
+
 ## Setup
 
 1. **Clone this repository:**
-
-   ```bash
-   git clone <repository-url>
-   cd kkp-within-kkp
-   ```
-
 2. **Copy the template secrets file:**
 
-   ```bash
-   cp secrets.template.env .k8c-creds.env
-   ```
+```bash
+cp secrets.template.env .k8c-creds.env
+```
 
 3. **Edit the credentials file with your values:**
 
-   ```bash
-   nano .k8c-creds.env
-   ```
-
 4. **Ensure you have a `seeds.yaml` file** in the current directory containing your Seed CR and Secret configuration.
-
-5. **Make the script executable:**
-   ```bash
-   chmod +x init.sh
-   ```
 
 ## Environment Variables
 
@@ -79,6 +40,8 @@ You'll also need:
 | K8C_CLUSTER_REPLICAS   | Number of cluster replicas to create               | No                                       | 1              |
 | SKIP_CLUSTER_CREATION  | Skip cluster creation step                         | No                                       | -              |
 | WAIT_TIMEOUT_MINUTES   | Timeout for waiting for nodes to have external IPs | No                                       | 15             |
+
+> You can see the templates in the [secrets.template.env](./secrets.template.env) file.
 
 ## How It Works
 
