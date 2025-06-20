@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -euo pipefail
+
 source utils.sh
 
 KKP_FILES_DIR="$(dirname $0)/kkp-files"
@@ -79,8 +81,7 @@ get_kubeconfig_from_kkp() {
 
   log "Fetching kubeconfig for cluster $cluster_id from project $project_id"
 
-  local temp_file
-  temp_file=$(mktemp)
+  local temp_file=$(mktemp)
   trap 'rm -f "$temp_file"' RETURN
 
   local http_status
