@@ -2,3 +2,5 @@
 kubeconfig*
 preset.yaml
 seed-mla.values.yaml
+auth
+kkp-files/

@@ -3,9 +3,8 @@
 source utils.sh
 
 KEY_PATH="$HOME/.ssh/kkp-cluster"
-LOCAL_FILES_DIR="$(dirname $0)/remote"
+KKP_FILES_DIR="$(dirname $0)/kkp-files"
 REMOTE_DIR=${REMOTE_DIR:-"/home/ubuntu"}
-AWS_HOST_USERNAME=${AWS_HOST_USERNAME:-"ubuntu"}
 
 declare -a required_secrets=(
   "K8C_PROJECT_ID"
@@ -15,7 +14,6 @@ declare -a required_secrets=(
   "KKP_VERSION"
   "KKP_HOST"
   "KKP_EMAIL"
-  "AWS_IP"
 )
 
 validate_creds_file() {
@@ -48,12 +46,22 @@ validate_creds_file() {
   log "Secrets file is valid, the script will use the credentials in '$k8sCreds' file"
 }
 
+check_cluster_match() {
+  if kubectl config get-clusters --no-headers 2>/dev/null | grep -q "^${K8C_CLUSTER_ID}$"; then
+    log "✅ K8C_CLUSTER_ID matches kubectl config"
+    return 0
+  else
+    error "❌ K8C_CLUSTER_ID ($K8C_CLUSTER_ID) not found in kubectl config, ensure that correct kubeconfig is being used"
+    return 1
+  fi
+}
+
 get_kubeconfig_from_kkp() {
-  local project_id="${1:-$K8C_PROJECT_ID}"
-  local cluster_id="${2:-$K8C_CLUSTER_ID}"
-  local kkp_host="${3:-$K8C_HOST}"
-  local kkp_token="${4:-$K8C_AUTH}"
-  local output_file="${5:-$LOCAL_FILES_DIR/kubeconfig-usercluster}"
+  local project_id="$K8C_PROJECT_ID"
+  local cluster_id="$K8C_CLUSTER_ID"
+  local kkp_host="$K8C_HOST"
+  local kkp_token="$K8C_AUTH"
+  local output_file="$KKP_FILES_DIR/kubeconfig-usercluster"
 
   if [ -z "$project_id" ] || [ -z "$cluster_id" ] || [ -z "$kkp_host" ] || [ -z "$kkp_token" ]; then
     error "Missing required parameters for get_kubeconfig_from_kkp"
@@ -122,52 +130,6 @@ get_kubeconfig_from_kkp() {
   return 0
 }
 
-check_ssh_connection() {
-  local max_retries=10
-  local retry_count=0
-
-  while true; do
-    if ssh -i "$KEY_PATH" -o ConnectTimeout=5 -o StrictHostKeyChecking=accept-new "$AWS_HOST" exit 2>/dev/null; then
-      return 0
-    else
-      log "SSH connection failed, retrying in 5 seconds..."
-      sleep 5
-    fi
-
-    retry_count=$((retry_count + 1))
-    if [ $retry_count -ge $max_retries ]; then
-      error "Failed to establish SSH connection after $max_retries retries"
-      return 1
-    fi
-  done
-}
-
-copy_files() {
-  echo "setting up preset CR"
-
-  cp "$LOCAL_FILES_DIR/preset-tpl.yaml" "$LOCAL_FILES_DIR/preset.yaml"
-  yq eval -i ".spec.aws.accessKeyID = \"$KKP_PRESET_AWS_ACCESSKEYID\"" "$LOCAL_FILES_DIR/preset.yaml"
-  yq eval -i ".spec.aws.datacenter = \"$KKP_PRESET_AWS_DATACENTER\"" "$LOCAL_FILES_DIR/preset.yaml"
-  yq eval -i ".spec.aws.secretAccessKey = \"$KKP_PRESET_AWS_SECRETACCESSKEY\"" "$LOCAL_FILES_DIR/preset.yaml"
-  yq eval -i ".spec.aws.vpcID = \"$KKP_PRESET_AWS_VPCID\"" "$LOCAL_FILES_DIR/preset.yaml"
-
-  cp "$LOCAL_FILES_DIR/seed-mla-tpl.values.yaml" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
-  yq eval -i ".prometheus.host = \"$KKP_HOST\"" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
-  yq eval -i ".alertmanager.host = \"$KKP_HOST\"" "$LOCAL_FILES_DIR/seed-mla.values.yaml"
-
-  echo "Copying setup script files to EC2..."
-  # Copy all files from remote/ directory and utils.sh to remote host.
-  # These scripts will be used to install KKP on the remote host machine.
-  scp -i "$KEY_PATH" -r "$LOCAL_FILES_DIR"/* utils.sh "$AWS_HOST:$REMOTE_DIR"
-  if [ $? -eq 0 ]; then
-    echo "Files copied successfully"
-    return 0
-  else
-    echo "Failed to copy files"
-    return 1
-  fi
-}
-
 generate_random_secret_key() {
   local secret_key_file="$1"
   if [ -z "$secret_key_file" ]; then
@@ -195,47 +157,106 @@ generate_random_secret_key() {
   fi
 }
 
-prepare_vault_files() {
-  log "Fetching files from vault. If you are not logged in to vault, please do so via 'vault login'"
+prepare_kkp_configs() {
+  local remote_files_dir="remote-files"
+  log "Preparing KKP configs in $remote_files_dir, creating directory if it doesn't exist..."
+  mkdir -p "$remote_files_dir"
 
-  local vault_files_dir="vault-files"
-  mkdir -p "$vault_files_dir"
-
-  vault kv get -field=presets.yaml "$VAULT_SECRET" >"$vault_files_dir/presets.yaml"
-  vault kv get -field=kubermatic.yaml "$VAULT_SECRET" >"$vault_files_dir/kubermatic.yaml"
-  vault kv get -field=helm-master.yaml "$VAULT_SECRET" >"$vault_files_dir/helm-master.yaml"
-
-  yq eval '.spec.featureGates.UserClusterMLA = false' -i "$vault_files_dir/kubermatic.yaml"
-  yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$vault_files_dir/kubermatic.yaml"
-  yq eval '.spec.ingress.domain = $KKP_HOST' -i "$vault_files_dir/kubermatic.yaml"
-
-  update_helm_master_file "$vault_files_dir/helm-master.yaml" "$vault_files_dir/helm-master-expected2.yaml"
-
-  vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$vault_files_dir/helm-seed-shared.yaml"
-  remove_yaml_scheduling_config "$vault_files_dir/helm-seed-shared.yaml"
-  yq eval '.minio.storeSize = "25Gi"' -i "$vault_files_dir/helm-seed-shared.yaml"
-
-  if ! generate_random_secret_key "$vault_files_dir/random-secret-key"; then
+  log "Generating random secret key for dex client secret..."
+  if ! generate_random_secret_key "$remote_files_dir/random-secret-key"; then
     error "Failed to generate random secret key"
     exit 1
   fi
 
-  success "Vault files prepared successfully"
+  log "Fetching files from vault. If you are not logged in to vault, please do so via 'vault login'"
+
+  vault kv get -field=presets.yaml "$VAULT_SECRET" >"$remote_files_dir/presets.yaml"
+  vault kv get -field=kubermatic.yaml "$VAULT_SECRET" >"$remote_files_dir/kubermatic.yaml"
+  vault kv get -field=helm-master.yaml "$VAULT_SECRET" >"$remote_files_dir/helm-master.yaml"
+  vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$remote_files_dir/helm-seed-shared.yaml"
+
+  # update KubermaticConfiguration
+  yq eval '.spec.featureGates.UserClusterMLA = false' -i "$remote_files_dir/kubermatic.yaml"
+  yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$remote_files_dir/kubermatic.yaml"
+  yq eval '.spec.ingress.domain = "'$KKP_HOST'"' -i "$remote_files_dir/kubermatic.yaml"
+
+  if ! update_helm_master_file "$remote_files_dir/helm-master.yaml"; then
+    error "Failed to update helm-master file"
+    exit 1
+  fi
+
+  if ! remove_yaml_scheduling_config "$remote_files_dir/helm-seed-shared.yaml"; then
+    error "Failed to remove YAML scheduling configurations"
+    exit 1
+  fi
+
+  yq eval '.minio.storeSize = "25Gi"' -i "$remote_files_dir/helm-seed-shared.yaml"
+
+  cp remote/cluster-issuer.yaml "$remote_files_dir"
+  yq eval '.spec.acme.email = "'$KKP_EMAIL'"' -i "$remote_files_dir/cluster-issuer.yaml"
+
+  success "Files prepared successfully"
 }
 
-install_dependencies() {
-  echo "installing KKP manifests..."
-  local export_string=""
+install_kubermatic_installer() {
+  log "Checking for kubermatic-installer availability..."
 
-  for var in "${required_secrets[@]}"; do
-    if [ -n "${!var}" ]; then
-      export_string+="export $var='${!var}' && "
-    fi
-  done
+  if [[ -f "$KKP_FILES_DIR/kubermatic-installer" && -d "$KKP_FILES_DIR/charts" ]]; then
+    log "Found kubermatic-installer in remote-files directory"
+    chmod +x "$KKP_FILES_DIR/kubermatic-installer"
+    success "Using kubermatic-installer from remote-files directory"
+    export KUBERMATIC_BINARY="$KKP_FILES_DIR/kubermatic-installer"
+    return 0
+  fi
 
-  echo "export string: $export_string"
-  exit 1
-  # ssh -i "$KEY_PATH" "$AWS_HOST" "${export_string}bash -l $REMOTE_DIR/install-kkp-manifests.sh"
+  local os=$(go env GOOS)
+  local arch=$(go env GOARCH)
+
+  log "kubermatic-installer not found locally. Downloading KKP $KKP_VERSION ($KKP_EDITION edition) for $os/$arch..."
+
+  local kkp_edition_str="kubermatic-$KKP_EDITION"
+  local download_url="https://github.com/kubermatic/kubermatic/releases/download/v${KKP_VERSION}/${kkp_edition_str}-v${KKP_VERSION}-${os}-${arch}.tar.gz"
+  local archive_path="$KKP_FILES_DIR/kkp-manifests/${kkp_edition_str}-${KKP_VERSION}.tar.gz"
+
+  mkdir -p "$KKP_FILES_DIR/kkp-manifests"
+
+  log "Downloading from: $download_url"
+  if ! curl -L "$download_url" --output "$archive_path"; then
+    error "Failed to download kubermatic-installer"
+    return 1
+  fi
+
+  log "Extracting archive to kkp-manifests directory..."
+  if ! tar -xzf "$archive_path" -C "$KKP_FILES_DIR/kkp-manifests"; then
+    error "Failed to extract kubermatic-installer archive"
+    return 1
+  fi
+
+  chmod +x "$KKP_FILES_DIR/kkp-manifests/kubermatic-installer"
+  cp "$KKP_FILES_DIR/kkp-manifests/kubermatic-installer" "$KKP_FILES_DIR/kubermatic-installer"
+  cp -r "$KKP_FILES_DIR/kkp-manifests/charts" "$KKP_FILES_DIR/charts"
+  rm "$archive_path"
+  rm -rf "$KKP_FILES_DIR/kkp-manifests"
+
+  export KUBERMATIC_BINARY="$KKP_FILES_DIR/kubermatic-installer"
+  success "Successfully installed kubermatic-installer to $KUBERMATIC_BINARY"
+
+  local version=$("$KUBERMATIC_BINARY" version -s 2>/dev/null || echo "unknown")
+  log "Installed version: $version"
+}
+
+install_kubermatic() {
+  install_kubermatic_installer
+
+  log "===> Installing KKP Master Cluster"
+
+  "$KUBERMATIC_BINARY" deploy \
+    --config "$KKP_FILES_DIR/kubermatic.yaml" \
+    --helm-values "$KKP_FILES_DIR/helm-master.yaml" \
+    --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
+    --deploy-default-app-catalog \
+    --storageclass aws \
+    --charts-directory "$KKP_FILES_DIR/charts"
 }
 
 main() {
@@ -244,7 +265,14 @@ main() {
   log "Starting to install KKP within KKP, on dev cluster"
 
   validate_creds_file
-  prepare_vault_files
+
+  # Check if K8C_CLUSTER_ID matches kubectl config
+  if ! check_cluster_match; then
+    error "Cluster ID validation failed. Please ensure K8C_CLUSTER_ID matches a cluster in your kubectl config"
+    exit 1
+  fi
+
+  prepare_kkp_configs
 
   # If SKIP_CLUSTER_CREATION is not set, create a cluster from the template
   if [ -z "$SKIP_CLUSTER_CREATION" ]; then
@@ -277,30 +305,8 @@ main() {
       exit 1
     fi
 
-    success "Found node with external IP: $AWS_IP"
+    success "Found node with external IP"
   fi
-
-  AWS_HOST=${AWS_HOST:-""}
-
-  if [ -z "$AWS_HOST" ]; then
-    export AWS_HOST="${AWS_HOST_USERNAME}@${AWS_IP}"
-    log "AWS_HOST environment variable is not set. Using default username $AWS_HOST_USERNAME and IP $AWS_IP
-Host: $AWS_HOST"
-  fi
-
-  log "AWS_HOST is being set to $AWS_HOST, trying to establish SSH connection..."
-
-  if ! check_ssh_connection; then
-    log "Cannot establish SSH connection. Please check the following:
-  1. SSH connectivity to the target host
-  2. KEY_PATH variable is correctly defined in the secrets file
-  3. AWS_IP variable is correctly defined in the secrets file
-  4. If you need to override the hostname, set the AWS_HOST variable while running the script"
-
-    exit 1
-  fi
-
-  success "SSH connection successful"
 
   echo "Fetching user cluster kubeconfig from kkp"
   if ! get_kubeconfig_from_kkp; then
@@ -308,21 +314,12 @@ Host: $AWS_HOST"
     exit 1
   fi
 
-  if ! copy_files; then
-    echo "Error: Failed to copy files to EC2"
+  if ! install_kubermatic; then
+    error "Failed to install Kubermatic"
     exit 1
   fi
 
-  if ! install_dependencies; then
-    echo "Error: Failed to install dependencies"
-    exit 1
-  fi
-
-  echo "***********************************"
-  echo "EC2 setup completed successfully!"
-  echo "  HOST: ${AWS_HOST}"
-  echo "ssh -i \"$KEY_PATH\" -o ConnectTimeout=5 \"$AWS_HOST\""
-  echo "***********************************"
+  success "KKP Master Cluster installed successfully"
 }
 
 main

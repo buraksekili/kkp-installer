@@ -290,9 +290,9 @@ remove_yaml_scheduling_config() {
 }
 
 update_helm_master_file() {
-    local source_file="${1:-vault-files/helm-master.yaml}"
-    local expected_file="${2:-vault-files/helm-master-expected.yaml}"
-    local admin_password="${3:-${ADMIN_PASSWORD:-}}"
+    local remote_files_dir="remote-files"
+    local source_file="${1:-${remote_files_dir}/helm-master.yaml}"
+    local admin_password="${ADMIN_PASSWORD:-}"
     if [ -z "$admin_password" ]; then
         error "Admin password is not set"
         return 1
@@ -300,6 +300,16 @@ update_helm_master_file() {
 
     if [ ! -f "$source_file" ]; then
         error "Source file '$source_file' does not exist"
+        return 1
+    fi
+
+    local secret_key_file="${remote_files_dir}/random-secret-key"
+    local dex_client_secret=""
+    if [ -f "$secret_key_file" ]; then
+        dex_client_secret=$(cat "$secret_key_file")
+        log "Read dex client secret from $secret_key_file"
+    else
+        error "Secret key file '$secret_key_file' not found"
         return 1
     fi
 
@@ -312,10 +322,6 @@ update_helm_master_file() {
     fi
 
     log "Generated bcrypt hash for admin password"
-
-    if [ ! -f "$expected_file" ] || [ ! -s "$expected_file" ]; then
-        cp "$source_file" "$expected_file"
-    fi
 
     local temp_file
     temp_file=$(mktemp /tmp/helm-master-update.XXXXXX)
@@ -332,23 +338,15 @@ update_helm_master_file() {
     sed -i '' 's/replicaCount: 2/replicaCount: 1/g' "$temp_file"
 
     # Replace specific hostnames with placeholders
-    sed -i '' 's/"dev\.kubermatic\.io"/<kkp_host>/g' "$temp_file"
-    sed -i '' 's/https:\/\/dev\.kubermatic\.io/https:\/\/<kkp_host>/g' "$temp_file"
-
-    # Remove authentication connectors section
-    awk '
-    BEGIN { skip = 0; }
-    /^    connectors:/ { skip = 1; next; }
-    /^    enablePasswordDB:/ { skip = 0; }
-    !skip { print $0; }
-    ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
+    sed -i '' 's/"dev\.kubermatic\.io"/'"$KKP_HOST"'/g' "$temp_file"
+    sed -i '' 's/https:\/\/dev\.kubermatic\.io/https:\/\/'"$KKP_HOST"'/g' "$temp_file"
 
     # Update user accounts
-    awk -v password_hash="$password_hash" '
+    awk -v password_hash="$password_hash" -v email="$KKP_EMAIL" '
     BEGIN { in_passwords = 0; printed = 0; }
     /^    staticPasswords:/ { 
         print "    staticPasswords:";
-        print "      - email: <admin_email>";
+        print "      - email: " email;
         print "        hash: \"" password_hash "\"";
         print "        username: admin";
         print "        userID: 08a8684b-db88-4b73-90a9-3cd1661f5466";
@@ -361,36 +359,38 @@ update_helm_master_file() {
     { print; } # Print all other lines
     ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
 
-    awk '
-    BEGIN { in_clients = 0; client_count = 0; skip_until_next_section = 0; }
+    awk -v dex_secret="$dex_client_secret" '
+    BEGIN { in_clients = 0; client_count = 0; skip_current_client = 0; }
     /^    staticClients:/ { in_clients = 1; print; next; }
-    /^telemetry:/ { in_clients = 0; skip_until_next_section = 0; print; next; }
+    /^    [a-zA-Z]/ { in_clients = 0; skip_current_client = 0; print; next; } # Any other section starts
     
     in_clients && /^      - id:/ {
         client_count++;
-        if (client_count <= 2) {
+        skip_current_client = (client_count > 2);
+        if (!skip_current_client) {
             print;
-            skip_until_next_section = 0;
-        } else {
-            skip_until_next_section = 1;
-            next;
         }
-    }
-    
-    in_clients && /^        secret:/ && client_count <= 2 {
-        print "        secret: <dex_client_secret>";
         next;
     }
     
-    skip_until_next_section { next; }
-    { print; }
+    in_clients && skip_current_client { next; } # Skip all lines for clients that should be skipped
+    
+    in_clients && /^        secret:/ {
+        print "        secret: " dex_secret;
+        next;
+    }
+    
+    { print; } # Print all other lines
     ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
 
     sed -i '' '/^cert-manager:/,/^$/d' "$temp_file"
     sed -i '' '/^nginx:/,/^$/d' "$temp_file"
 
+    # set `useNewDexChart: true`
+    yq eval '.useNewDexChart = true' -i "$temp_file"
+
     mv "$temp_file" "$source_file"
 
-    success "Updated $source_file based on the reference in $expected_file"
+    success "Updated $source_file"
     return 0
 }
