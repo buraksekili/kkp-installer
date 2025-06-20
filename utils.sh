@@ -360,29 +360,29 @@ update_helm_master_file() {
     { print; } # Print all other lines
     ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
 
-    awk -v dex_secret="$dex_client_secret" '
-    BEGIN { in_clients = 0; client_count = 0; skip_current_client = 0; }
-    /^    staticClients:/ { in_clients = 1; print; next; }
-    /^    [a-zA-Z]/ { in_clients = 0; skip_current_client = 0; print; next; } # Any other section starts
-    
-    in_clients && /^      - id:/ {
-        client_count++;
-        skip_current_client = (client_count > 2);
-        if (!skip_current_client) {
-            print;
-        }
-        next;
-    }
-    
-    in_clients && skip_current_client { next; } # Skip all lines for clients that should be skipped
-    
-    in_clients && /^        secret:/ {
-        print "        secret: " dex_secret;
-        next;
-    }
-    
-    { print; } # Print all other lines
-    ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
+    # awk -v dex_secret="$dex_client_secret" '
+    # BEGIN { in_clients = 0; client_count = 0; skip_current_client = 0; }
+    # /^    staticClients:/ { in_clients = 1; print; next; }
+    # /^    [a-zA-Z]/ { in_clients = 0; skip_current_client = 0; print; next; } # Any other section starts
+
+    # in_clients && /^      - id:/ {
+    #     client_count++;
+    #     skip_current_client = (client_count > 2);
+    #     if (!skip_current_client) {
+    #         print;
+    #     }
+    #     next;
+    # }
+
+    # in_clients && skip_current_client { next; } # Skip all lines for clients that should be skipped
+
+    # in_clients && /^        secret:/ {
+    #     print "        secret: " dex_secret;
+    #     next;
+    # }
+
+    # { print; } # Print all other lines
+    # ' "$temp_file" >"$temp_file.new" && mv "$temp_file.new" "$temp_file"
 
     sed -i '' '/^cert-manager:/,/^$/d' "$temp_file"
     sed -i '' '/^nginx:/,/^$/d' "$temp_file"
@@ -390,8 +390,12 @@ update_helm_master_file() {
     # set `useNewDexChart: true`
     yq eval '.useNewDexChart = true' -i "$temp_file"
 
+    # Update all domains to KKP_HOST (good for MLA deployments)
+    sed -i '' 's/dev.kubermatic.io/'"$KKP_HOST"'/g' "$temp_file"
+
     mv "$temp_file" "$source_file"
 
     success "Updated $source_file"
+
     return 0
 }
