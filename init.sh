@@ -2,7 +2,6 @@
 
 source utils.sh
 
-KEY_PATH="$HOME/.ssh/kkp-cluster"
 KKP_FILES_DIR="$(dirname $0)/kkp-files"
 REMOTE_DIR=${REMOTE_DIR:-"/home/ubuntu"}
 
@@ -175,6 +174,9 @@ prepare_kkp_configs() {
   vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/helm-seed-shared.yaml"
 
   # update KubermaticConfiguration
+
+  yq eval 'del(.spec.applications)' -i "$KKP_FILES_DIR/kubermatic.yaml"
+
   yq eval '.spec.featureGates.UserClusterMLA = false' -i "$KKP_FILES_DIR/kubermatic.yaml"
   yq eval '.spec.featureGates.VerticalPodAutoscaler = false' -i "$KKP_FILES_DIR/kubermatic.yaml"
   yq eval '.spec.ingress.domain = "'$KKP_HOST'"' -i "$KKP_FILES_DIR/kubermatic.yaml"
@@ -251,19 +253,48 @@ install_kubermatic() {
 
   log "===> Installing KKP Master Cluster"
 
-  "$KUBERMATIC_BINARY" deploy \
+  $KUBERMATIC_BINARY deploy \
     --config "$KKP_FILES_DIR/kubermatic.yaml" \
     --helm-values "$KKP_FILES_DIR/helm-master.yaml" \
     --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
     --deploy-default-app-catalog \
     --storageclass aws \
-    --charts-directory "$KKP_FILES_DIR/charts"
+    --charts-directory "$KKP_FILES_DIR/charts" \
+    --verbose
+
+  kubectl apply -f "$KKP_FILES_DIR/cluster-issuer.yaml"
+
+  success "KKP Master Cluster installed successfully"
+
+  $KUBERMATIC_BINARY convert-kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" >"$KKP_FILES_DIR/kubeconfig-seed"
+
+  $KUBERMATIC_BINARY deploy kubermatic-seed \
+    --config "$KKP_FILES_DIR/kubermatic.yaml" \
+    --helm-values "$KKP_FILES_DIR/helm-seed-shared.yaml" \
+    --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
+    --charts-directory "$KKP_FILES_DIR/charts" \
+    --verbose
+
+  encodedSeedKubeconfig=$(base64 -i "$KKP_FILES_DIR/kubeconfig-seed" | tr -d '\n')
+  yq eval '.data.kubeconfig = "'$encodedSeedKubeconfig'"' -i "seeds.yaml"
+  kubectl apply -f "seeds.yaml"
+  kubectl apply -f "$KKP_FILES_DIR/presets.yaml"
+
+  success "KKP Seed Cluster installed successfully"
 }
 
 main() {
   SKIP_CLUSTER_CREATION=${SKIP_CLUSTER_CREATION:-""}
 
   log "Starting to install KKP within KKP, on dev cluster"
+
+  # check if ./seeds.yaml exists
+  if [ ! -f "seeds.yaml" ]; then
+    error "seeds.yaml not found in the current directory
+    Ensure that Seed CR (including its Secret) is present in the current directory, as it will be used to install the seed cluster.
+    "
+    exit 1
+  fi
 
   validate_creds_file
 
@@ -320,7 +351,8 @@ main() {
     exit 1
   fi
 
-  success "KKP Master Cluster installed successfully"
+  success "KKP Master & Seed (shared) cluster should be installed successfully"
+  log "Ensure that DNS records are updated accordingly"
 }
 
 main
