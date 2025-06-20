@@ -173,6 +173,7 @@ prepare_kkp_configs() {
   vault kv get -field=kubermatic.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/kubermatic.yaml"
   vault kv get -field=helm-master.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/helm-master.yaml"
   vault kv get -field=helm-seed-shared.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/helm-seed-shared.yaml"
+  vault kv get -field=helm-seed-shared-mla.yaml "$VAULT_SECRET" >"$KKP_FILES_DIR/values-seed-mla.yaml"
 
   # update KubermaticConfiguration
 
@@ -195,6 +196,38 @@ prepare_kkp_configs() {
   fi
 
   yq eval '.minio.storeSize = "25Gi"' -i "$KKP_FILES_DIR/helm-seed-shared.yaml"
+
+  ##########################################
+  # update seed mla values
+  ##########################################
+  yq eval '.prometheus.tsdb.retentionTime = "1h"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # enable backup
+  yq eval '.prometheus.backup.enabled = true' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # reduce resources
+  yq eval '.prometheus.containers.prometheus.resources.requests.cpu = "0.5"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  yq eval '.prometheus.containers.prometheus.resources.requests.memory = "500Mi"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # disable blackbox exporter
+  yq eval '.prometheus.scraping.blackBoxExporter.enabled = false' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # yq eval '.prometheus.scraping.configs = []' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  sed -i '' 's/dev.kubermatic.io/'"$KKP_HOST"'/g' "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # remove loki services
+  yq eval 'del(.prometheus.provisioning.datasources.lokiServices)' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # decrease the number of alertmanager replicas
+  yq eval '.alertmanager.replicaCount = 1' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # aws ebs io1 volume supports 4Gi at least
+  yq eval '.alertmanager.persistence.size = "4Gi"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+
+  # remove loki, karma, promtail, kube-state-metrics, helm-exporter
+  yq eval 'del(.loki)' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  yq eval 'del(.karma)' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  yq eval 'del(.promtail)' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  yq eval 'del(.kube-state-metrics)' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  yq eval 'del(.helm-exporter)' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+
+  if ! remove_yaml_scheduling_config "$KKP_FILES_DIR/values-seed-mla.yaml"; then
+    error "Failed to remove YAML scheduling configurations"
+    exit 1
+  fi
 
   cp remote/cluster-issuer.yaml "$KKP_FILES_DIR"
   yq eval '.spec.acme.email = "'$KKP_EMAIL'"' -i "$KKP_FILES_DIR/cluster-issuer.yaml"
@@ -282,6 +315,17 @@ install_kubermatic() {
   kubectl apply -f "$KKP_FILES_DIR/presets.yaml"
 
   success "KKP Seed Cluster installed successfully"
+
+  log "Installing KKP Seed Cluster (MLA)..."
+
+  $KUBERMATIC_BINARY deploy seed-mla \
+    --config "$KKP_FILES_DIR/kubermatic.yaml" \
+    --helm-values "$KKP_FILES_DIR/values-seed-mla.yaml" \
+    --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
+    --charts-directory "$KKP_FILES_DIR/charts" \
+    --verbose
+
+  success "KKP Seed Cluster (MLA) installed successfully"
 }
 
 main() {
