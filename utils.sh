@@ -79,7 +79,7 @@ check_template_exists() {
     log "Checking if template $template_id exists in project $project_id"
 
     if ! response=$(api_request "GET" "/api/v2/projects/$project_id/clustertemplates" "" "$kkp_token"); then
-        error "Failed to fetch cluster templates from API"
+        error "Failed to fetch cluster templates from API, $response"
         return 1
     fi
 

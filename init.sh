@@ -9,7 +9,6 @@ REMOTE_DIR=${REMOTE_DIR:-"/home/ubuntu"}
 
 declare -a required_secrets=(
   "K8C_PROJECT_ID"
-  "K8C_CLUSTER_ID"
   "K8C_HOST"
   "K8C_AUTH"
   "KKP_VERSION"
@@ -121,11 +120,14 @@ get_kubeconfig_from_kkp() {
     return 1
   fi
 
+  export KUBECONFIG="$output_file"
+
   success "Successfully downloaded kubeconfig to $output_file"
   log "Kubeconfig details:"
-  log "  Project ID: $project_id"
-  log "  Cluster ID: $cluster_id"
-  log "  Output file: $output_file"
+  echo "  Project ID: $project_id"
+  echo "  Cluster ID: $cluster_id"
+  echo "  Output file: $output_file"
+  echo "  KUBECONFIG: $KUBECONFIG"
 
   return 0
 }
@@ -343,13 +345,15 @@ main() {
 
   validate_creds_file
 
-  # Check if K8C_CLUSTER_ID matches kubectl config
-  if ! check_cluster_match; then
-    error "Cluster ID validation failed. Please ensure K8C_CLUSTER_ID matches a cluster in your kubectl config"
+  # if SKIP_CLUSTER_CREATION is set, we need proper K8C_CLUSTER_ID to be set
+  # if K8C_CLUSTER_ID is not set, thrown an error
+  if [[ -n "$SKIP_CLUSTER_CREATION" && -z "$K8C_CLUSTER_ID" ]]; then
+    error "If the cluster creation is skipped via SKIP_CLUSTER_CREATION environment variable, please provide K8C_CLUSTER_ID environment variable to point out the cluster where KKP will be installed"
     exit 1
   fi
 
   prepare_kkp_configs
+  log "KKP files are populated in $KKP_FILES_DIR"
 
   # If SKIP_CLUSTER_CREATION is not set, create a cluster from the template
   if [ -z "$SKIP_CLUSTER_CREATION" ]; then
@@ -388,6 +392,11 @@ main() {
   echo "Fetching user cluster kubeconfig from kkp"
   if ! get_kubeconfig_from_kkp; then
     error "Failed to fetch kubeconfig from KKP"
+    exit 1
+  fi
+
+  if ! check_cluster_match; then
+    error "Cluster ID validation failed. Please ensure K8C_CLUSTER_ID matches a cluster in your kubectl config"
     exit 1
   fi
 
