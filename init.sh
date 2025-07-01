@@ -312,7 +312,7 @@ install_kubermatic() {
     --verbose
 
   encodedSeedKubeconfig=$(base64 -i "$KKP_FILES_DIR/kubeconfig-seed" | tr -d '\n')
-  yq eval '.data.kubeconfig = "'$encodedSeedKubeconfig'"' -i "seeds.yaml"
+  sed -i '' 's/__DEV_KUBECONFIG__/'"$encodedSeedKubeconfig"'/g' seeds.yaml
   kubectl apply -f "seeds.yaml"
   kubectl apply -f "$KKP_FILES_DIR/presets.yaml"
 
