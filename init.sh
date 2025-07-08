@@ -59,11 +59,11 @@ check_cluster_match() {
 get_kubeconfig_from_kkp() {
   local project_id="$K8C_PROJECT_ID"
   local cluster_id="$K8C_CLUSTER_ID"
-  local kkp_host="$K8C_HOST"
+  local k8c_host="$K8C_HOST"
   local kkp_token="$K8C_AUTH"
   local output_file="$KKP_FILES_DIR/kubeconfig-usercluster"
 
-  if [ -z "$project_id" ] || [ -z "$cluster_id" ] || [ -z "$kkp_host" ] || [ -z "$kkp_token" ]; then
+  if [ -z "$project_id" ] || [ -z "$cluster_id" ] || [ -z "$k8c_host" ] || [ -z "$kkp_token" ]; then
     error "Missing required parameters for get_kubeconfig_from_kkp"
     return 1
   fi
@@ -86,7 +86,7 @@ get_kubeconfig_from_kkp() {
   local http_status
   http_status=$(curl -s -w "%{http_code}" \
     -o "$temp_file" \
-    -X GET "${kkp_host}/api/v2/projects/${project_id}/clusters/${cluster_id}/kubeconfig" \
+    -X GET "${k8c_host}/api/v2/projects/${project_id}/clusters/${cluster_id}/kubeconfig" \
     -H "accept: application/octet-stream" \
     -H "Authorization: Bearer $kkp_token" 2>/dev/null)
 
@@ -203,8 +203,8 @@ prepare_kkp_configs() {
   # update seed mla values
   ##########################################
   yq eval '.prometheus.tsdb.retentionTime = "1h"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
-  # enable backup
-  yq eval '.prometheus.backup.enabled = true' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+  # disable backup
+  yq eval '.prometheus.backup.enabled = false' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
   # reduce resources
   yq eval '.prometheus.containers.prometheus.resources.requests.cpu = "0.5"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
   yq eval '.prometheus.containers.prometheus.resources.requests.memory = "500Mi"' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
@@ -289,14 +289,18 @@ install_kubermatic() {
 
   log "===> Installing KKP Master Cluster"
 
-  $KUBERMATIC_BINARY deploy \
+
+  if ! $KUBERMATIC_BINARY deploy kubermatic-master \
     --config "$KKP_FILES_DIR/kubermatic.yaml" \
     --helm-values "$KKP_FILES_DIR/helm-master.yaml" \
     --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
     --deploy-default-app-catalog \
     --storageclass aws \
     --charts-directory "$KKP_FILES_DIR/charts" \
-    --verbose
+    --verbose; then
+    error "Failed to deploy KKP Master Cluster"
+    return 1
+  fi
 
   kubectl apply -f "$KKP_FILES_DIR/cluster-issuer.yaml"
 
@@ -304,28 +308,43 @@ install_kubermatic() {
 
   $KUBERMATIC_BINARY convert-kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" >"$KKP_FILES_DIR/kubeconfig-seed"
 
-  $KUBERMATIC_BINARY deploy kubermatic-seed \
+  # if you deploy seed CR before deploying seed cluster, you'll get useful
+  # log messages to set DNS, which is helpful.
+  kubectl apply -f "seeds.yaml"
+
+  if ! $KUBERMATIC_BINARY deploy kubermatic-seed \
     --config "$KKP_FILES_DIR/kubermatic.yaml" \
     --helm-values "$KKP_FILES_DIR/helm-seed-shared.yaml" \
     --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
     --charts-directory "$KKP_FILES_DIR/charts" \
-    --verbose
+    --verbose; then
+    error "Failed to deploy KKP Seed Cluster"
+    return 1
+  fi
 
   encodedSeedKubeconfig=$(base64 -i "$KKP_FILES_DIR/kubeconfig-seed" | tr -d '\n')
-  sed -i '' 's/__DEV_KUBECONFIG__/'"$encodedSeedKubeconfig"'/g' seeds.yaml
-  kubectl apply -f "seeds.yaml"
+  yq eval 'select(.kind == "Secret" and .metadata.name == "kubeconfig-seed-shared").data.kubeconfig = "'"$encodedSeedKubeconfig"'"' -i seeds.yaml
+  # while running the script iterateviley, the kubeconfig might be already written
+  # therefore, its content is not __DEV_KUBECONFIG__; so, the following statement
+  # will not work; so, we need to use yq to update the kubeconfig.
+  #
+  # sed -i '' 's/__DEV_KUBECONFIG__/'"$encodedSeedKubeconfig"'/g' seeds.yaml
+
   kubectl apply -f "$KKP_FILES_DIR/presets.yaml"
 
   success "KKP Seed Cluster installed successfully"
 
   log "Installing KKP Seed Cluster (MLA)..."
 
-  $KUBERMATIC_BINARY deploy seed-mla \
+  if ! $KUBERMATIC_BINARY deploy seed-mla \
     --config "$KKP_FILES_DIR/kubermatic.yaml" \
     --helm-values "$KKP_FILES_DIR/values-seed-mla.yaml" \
     --kubeconfig "$KKP_FILES_DIR/kubeconfig-usercluster" \
     --charts-directory "$KKP_FILES_DIR/charts" \
-    --verbose
+    --verbose; then
+    error "Failed to deploy KKP Seed Cluster (MLA)"
+    return 1
+  fi
 
   success "KKP Seed Cluster (MLA) installed successfully"
 }
