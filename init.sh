@@ -43,6 +43,8 @@ validate_creds_file() {
     exit 1
   fi
 
+  export KKP_EDITION=${KKP_EDITION:-"ee"}
+
   log "Secrets file is valid, the script will use the credentials in '$k8sCreds' file"
 }
 
@@ -285,10 +287,14 @@ install_kubermatic_installer() {
 }
 
 install_kubermatic() {
-  install_kubermatic_installer
+  if ! install_kubermatic_installer; then
+	  error "failed to install kubermatic_installer"
+	  return 1
+  fi
 
   log "===> Installing KKP Master Cluster"
 
+  kubectl apply -f "seeds.yaml"
 
   if ! $KUBERMATIC_BINARY deploy kubermatic-master \
     --config "$KKP_FILES_DIR/kubermatic.yaml" \
@@ -310,6 +316,8 @@ install_kubermatic() {
 
   # if you deploy seed CR before deploying seed cluster, you'll get useful
   # log messages to set DNS, which is helpful.
+  encodedSeedKubeconfig=$(base64 -i "$KKP_FILES_DIR/kubeconfig-seed" | tr -d '\n')
+  yq eval '(select(.kind == "Secret" and .metadata.name == "kubeconfig-seed-kkp-qa-env") | .data.kubeconfig) = "'"$encodedSeedKubeconfig"'"' -i seeds.yaml
   kubectl apply -f "seeds.yaml"
 
   if ! $KUBERMATIC_BINARY deploy kubermatic-seed \
@@ -321,14 +329,6 @@ install_kubermatic() {
     error "Failed to deploy KKP Seed Cluster"
     return 1
   fi
-
-  encodedSeedKubeconfig=$(base64 -i "$KKP_FILES_DIR/kubeconfig-seed" | tr -d '\n')
-  yq eval 'select(.kind == "Secret" and .metadata.name == "kubeconfig-seed-shared").data.kubeconfig = "'"$encodedSeedKubeconfig"'"' -i seeds.yaml
-  # while running the script iterateviley, the kubeconfig might be already written
-  # therefore, its content is not __DEV_KUBECONFIG__; so, the following statement
-  # will not work; so, we need to use yq to update the kubeconfig.
-  #
-  # sed -i '' 's/__DEV_KUBECONFIG__/'"$encodedSeedKubeconfig"'/g' seeds.yaml
 
   kubectl apply -f "$KKP_FILES_DIR/presets.yaml"
 
@@ -406,6 +406,13 @@ main() {
     fi
 
     success "Found node with external IP"
+  fi
+
+  log "Waiting for cluster nodes to be ready with external IPs..."
+  wait_timeout=${WAIT_TIMEOUT_MINUTES:-15}
+  if ! wait_for_nodes_external_ip "$K8C_PROJECT_ID" "$K8C_CLUSTER_ID" "$K8C_AUTH" "$K8C_HOST" "$wait_timeout"; then
+    error "Timed out waiting for cluster nodes to have external IPs"
+    exit 1
   fi
 
   echo "Fetching user cluster kubeconfig from kkp"
