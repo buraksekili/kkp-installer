@@ -396,7 +396,11 @@ main() {
     log "Sleeping for 10 seconds to let the cluster settle..."
     sleep 10
 
-    list_recently_created_clusters "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST"
+    if ! list_recently_created_clusters "$K8C_PROJECT_ID" "$K8C_AUTH" "$K8C_HOST"; then
+      error "failed to create the cluster"
+      exit 1
+    fi
+    
 
     log "Waiting for cluster nodes to be ready with external IPs..."
     wait_timeout=${WAIT_TIMEOUT_MINUTES:-15}
