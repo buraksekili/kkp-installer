@@ -1,7 +1,23 @@
+# direnv configuration (may contain paths to secrets)
+.envrc
+
 .k8c-creds.env
+.env
 kubeconfig*
 preset.yaml
 seed-mla.values.yaml
 auth
 kkp-files/
 seeds.yaml
+
+# TLS backup files
+tls-backup.yaml
+kkp-files/tls-backup.yaml
+
+# KubeOne generated files
+kubeone-aws/terraform.tfvars
+kubeone-aws/kubeone.yaml
+kubeone-aws/tf.json
+kubeone-aws/.terraform/
+kubeone-aws/terraform.tfstate
+kubeone-aws/terraform.tfstate.backup

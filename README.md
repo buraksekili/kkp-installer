@@ -10,6 +10,70 @@ You'll also need:
 
 > Old branch can be found https://github.com/buraksekili/kkp-installer/tree/old
 
+## Optional: direnv Setup
+
+For automatic credential loading, you can use [direnv](https://direnv.net/):
+
+1. Install direnv: `brew install direnv` (macOS) or see [installation docs](https://direnv.net/docs/installation.html)
+2. Hook direnv into your shell: `eval "$(direnv hook bash)"` (add to `~/.bashrc` or `~/.zshrc`)
+3. Login to Vault: `vault login`
+4. Allow direnv in this directory: `direnv allow`
+
+Now AWS and Route53 credentials will be automatically loaded when you enter this directory.
+
+Without direnv, the script fetches credentials from Vault internally using the same paths.
+
+## Provisioning Methods
+
+The installer supports two provisioning methods:
+
+### KKP-within-KKP (default)
+
+Creates a KKP cluster inside an existing KKP user cluster using ClusterTemplates.
+
+```bash
+PROVISIONING_METHOD=kkp ./init.sh
+```
+
+### KubeOne AWS
+
+Provisions a standalone AWS cluster using KubeOne and Terraform.
+
+```bash
+PROVISIONING_METHOD=kubeone ./init.sh
+```
+
+**Required for KubeOne:**
+- `VAULT_AWS_PATH` - Vault path for AWS resource credentials (required env var)
+- `VAULT_ROUTE53_PATH` - Vault path for Route53 DNS credentials (required env var)
+- SSH public key at `SSH_PUBLIC_KEY_FILE`
+- Route53 hosted zone for `KKP_HOST` domain
+
+**KubeOne-specific Environment Variables:**
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| PROVISIONING_METHOD | Provisioning method | kkp |
+| VAULT_AWS_PATH | Vault path for AWS resource credentials | (required) |
+| VAULT_ROUTE53_PATH | Vault path for Route53 DNS credentials | (required) |
+| KUBEONE_CLUSTER_NAME | Cluster name | kkp-test |
+| AWS_REGION | AWS region | eu-central-1 |
+| AWS_VPC_ID | VPC ID | default |
+| AWS_INSTANCE_TYPE | Control plane EC2 instance type | t3.medium |
+| AWS_VOLUME_SIZE | Control plane EBS volume size (GB) | 50 |
+| AWS_WORKER_INSTANCE_TYPE | Worker node EC2 instance type | r5.xlarge |
+| AWS_WORKER_VOLUME_SIZE | Worker node EBS volume size (GB) | 200 |
+| KUBEONE_K8S_VERSION | Kubernetes version | 1.28.0 |
+| SSH_PUBLIC_KEY_FILE | SSH public key path | ~/.ssh/k8c_bs.pub |
+
+## TLS Certificate Management
+
+When using KubeOne provisioning, TLS certificates are backed up to `kkp-files/tls-backup.yaml`. This prevents hitting Let's Encrypt rate limits when rebuilding clusters.
+
+The backup is automatically:
+- Created after first certificate issuance
+- Restored on subsequent runs (before cert-manager runs)
+
 ## Setup
 
 1. **Clone this repository:**
@@ -27,14 +91,15 @@ cp secrets.template.env .k8c-creds.env
 
 | Variable               | Description                                        | Required                                 | Default        |
 | ---------------------- | -------------------------------------------------- | ---------------------------------------- | -------------- |
-| K8C_PROJECT_ID         | KKP project ID                                     | Yes                                      | -              |
-| K8C_CLUSTER_ID         | KKP cluster ID                                     | Yes                                      | -              |
-| K8C_HOST               | KKP API host                                       | Yes                                      | -              |
-| K8C_AUTH               | KKP API token                                      | Yes                                      | -              |
+| K8C_PROJECT_ID         | KKP project ID                                     | Yes (kkp method)                         | -              |
+| K8C_CLUSTER_ID         | KKP cluster ID                                     | Yes (kkp method)                         | -              |
+| K8C_HOST               | KKP API host                                       | Yes (kkp method)                         | -              |
+| K8C_AUTH               | KKP API token                                      | Yes (kkp method)                         | -              |
 | KKP_VERSION            | KKP version to install                             | Yes                                      | -              |
 | KKP_HOST               | Domain for the new KKP instance                    | Yes                                      | -              |
 | KKP_EMAIL              | Email for Let's Encrypt and admin user             | Yes                                      | -              |
 | ADMIN_PASSWORD         | Password for the KKP admin user                    | Yes                                      | -              |
+| PROVISIONING_METHOD    | Provisioning method (kkp or kubeone)               | No                                       | kkp            |
 | K8C_CREDS              | Path to credentials file                           | No                                       | .k8c-creds.env |
 | K8C_CLUSTER_TEMPLATEID | Template ID for creating a new cluster             | Only if SKIP_CLUSTER_CREATION is not set | -              |
 | K8C_CLUSTER_REPLICAS   | Number of cluster replicas to create               | No                                       | 1              |

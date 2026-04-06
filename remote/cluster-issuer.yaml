@@ -9,6 +9,7 @@ spec:
     privateKeySecretRef:
       name: letsencrypt-prod-acme-account-key
     solvers:
+    # TODO: use dns01 solver with Route53
       - http01:
           ingress:
             class: nginx
