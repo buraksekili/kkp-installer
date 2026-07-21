@@ -727,11 +727,55 @@ backup_tls_secret() {
   success "TLS certificate $secret_name backed up to $backup_file"
 }
 
+# wait_for_lb_hostname - Polls a kubectl resource until the given jsonpath
+# resolves to a non-empty value (the LoadBalancer hostname a CNAME points at).
+# Cloud LoadBalancers are provisioned asynchronously, so the address is not
+# present the instant the resource is created.
+# Arguments:
+#   $1 - human-readable description used in log/error messages
+#   $2 - jsonpath expression to extract (without the surrounding braces)
+#   $3 - timeout in minutes (optional, defaults to 5)
+#   $@ - remaining args: kubectl get selectors (e.g. gateway -n kubermatic kubermatic)
+# Outputs:
+#   Prints the resolved hostname on stdout; all logs go to stderr so the caller
+#   can capture stdout with a command substitution.
+wait_for_lb_hostname() {
+  local description="$1"
+  local jsonpath="$2"
+  local timeout_minutes="$3"
+  shift 3
+  local kubectl_selector=("$@")
+
+  local start_time=$(date +%s)
+  local end_time=$((start_time + timeout_minutes * 60))
+  local retry_interval=15
+
+  while true; do
+    local hostname
+    hostname=$(kubectl get "${kubectl_selector[@]}" -o jsonpath="{$jsonpath}" 2> /dev/null)
+
+    if [ -n "$hostname" ]; then
+      echo "$hostname"
+      return 0
+    fi
+
+    if [ "$(date +%s)" -ge "$end_time" ]; then
+      error "Timeout waiting for ${description} hostname" >&2
+      return 1
+    fi
+
+    log "Waiting for ${description} hostname, retrying in ${retry_interval}s..." >&2
+    sleep $retry_interval
+  done
+}
+
 # update_route53_dns_records - Creates/updates Route53 DNS records for KKP services
 # Arguments:
 #   $1 - base domain (e.g., burak.lab.kubermatic.io)
 #   $2 - seed name (optional, defaults to "kubermatic")
 #   $3 - hosted zone id (optional, defaults to "Z08267412VFVFOL4NEM4P")
+#   $4 - gateway API enabled (optional, "true" to read the master LB from the
+#        Gateway instead of the nginx-ingress-controller service)
 # Requires:
 #   ROUTE53_ACCESS_KEY_ID and ROUTE53_SECRET_ACCESS_KEY environment variables
 #   kubectl configured with correct kubeconfig
@@ -741,6 +785,7 @@ update_route53_dns_records() {
   local base_domain="$1"
   local seed_name="${2:-kubermatic}"
   local hosted_zone_id="${3:-Z08267412VFVFOL4NEM4P}"
+  local gateway_api_enabled="${4:-false}"
 
   if [ -z "$base_domain" ]; then
     error "update_route53_dns_records: base_domain is required"
@@ -754,26 +799,23 @@ update_route53_dns_records() {
 
   log "Updating Route53 DNS records for $base_domain..."
 
-  # Wait for nginx-ingress-controller LoadBalancer
-  log "Waiting for nginx-ingress-controller LoadBalancer..."
-  local nginx_lb
-  nginx_lb=$(kubectl get svc -n nginx-ingress-controller nginx-ingress-controller -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2> /dev/null)
-
-  if [ -z "$nginx_lb" ]; then
-    error "nginx-ingress-controller LoadBalancer hostname not found"
-    return 1
+  # the master domain LB comes from the Gateway when Gateway API is on, and from
+  # the nginx-ingress-controller service otherwise (nginx is not deployed with
+  # Gateway API enabled).
+  local master_lb
+  if [ "$gateway_api_enabled" = "true" ]; then
+    log "Gateway API enabled, reading master LoadBalancer from Gateway kubermatic/kubermatic..."
+    master_lb=$(wait_for_lb_hostname "Gateway kubermatic/kubermatic" ".status.addresses[0].value" 5 \
+      gateway -n kubermatic kubermatic) || return 1
+  else
+    master_lb=$(wait_for_lb_hostname "nginx-ingress-controller LoadBalancer" ".status.loadBalancer.ingress[0].hostname" 5 \
+      svc -n nginx-ingress-controller nginx-ingress-controller) || return 1
   fi
-  log "Found nginx LoadBalancer: $nginx_lb"
+  log "Found master LoadBalancer: $master_lb"
 
-  # Wait for nodeport-proxy LoadBalancer
-  log "Waiting for nodeport-proxy LoadBalancer..."
   local nodeport_lb
-  nodeport_lb=$(kubectl get svc -n kubermatic nodeport-proxy -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2> /dev/null)
-
-  if [ -z "$nodeport_lb" ]; then
-    error "nodeport-proxy LoadBalancer hostname not found"
-    return 1
-  fi
+  nodeport_lb=$(wait_for_lb_hostname "nodeport-proxy LoadBalancer" ".status.loadBalancer.ingress[0].hostname" 5 \
+    svc -n kubermatic nodeport-proxy) || return 1
   log "Found nodeport-proxy LoadBalancer: $nodeport_lb"
 
   # Create/Update DNS records
@@ -791,7 +833,7 @@ update_route53_dns_records() {
         "Name": "$base_domain.",
         "Type": "CNAME",
         "TTL": 60,
-        "ResourceRecords": [{"Value": "$nginx_lb"}]
+        "ResourceRecords": [{"Value": "$master_lb"}]
       }
     },
     {
@@ -800,7 +842,7 @@ update_route53_dns_records() {
         "Name": "*.$base_domain.",
         "Type": "CNAME",
         "TTL": 60,
-        "ResourceRecords": [{"Value": "$nginx_lb"}]
+        "ResourceRecords": [{"Value": "$master_lb"}]
       }
     },
     {
@@ -827,8 +869,8 @@ EOF
   }
 
   success "Route53 DNS records updated successfully"
-  log "  - $base_domain -> $nginx_lb"
-  log "  - *.$base_domain -> $nginx_lb"
+  log "  - $base_domain -> $master_lb"
+  log "  - *.$base_domain -> $master_lb"
   log "  - *.$seed_name.$base_domain -> $nodeport_lb"
 }
 
@@ -887,6 +929,7 @@ export -f check_tls_backup
 export -f restore_tls_from_backup
 export -f get_tls_secret_name_from_certificate
 export -f backup_tls_secret
+export -f wait_for_lb_hostname
 export -f update_route53_dns_records
 export -f parse_kubermatic_version
 export -f get_kubermatic_installer_version

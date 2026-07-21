@@ -486,6 +486,15 @@ prepare_kkp_configs_kubeone() {
 		cp "$KKP_FILES_DIR/helm-master.yaml" "$KKP_FILES_DIR/helm-master-gateway.yaml"
 	fi
 
+	# --migrate-gateway-api is passed to every deploy step when gatewayAPI is on,
+	# and each step requires migrateGatewayAPI=true in its own helm-values file.
+	# the master file is handled above; set it on the seed and MLA value files too.
+	if config_enabled '.features.gatewayAPI'; then
+		yq eval '.migrateGatewayAPI = true' -i "$KKP_FILES_DIR/helm-seed-shared.yaml"
+		yq eval '.migrateGatewayAPI = true' -i "$KKP_FILES_DIR/values-seed-mla.yaml"
+		log "Set migrateGatewayAPI=true on seed and MLA helm values"
+	fi
+
 	# --- image override ---
 	local image_repo
 	image_repo=$(config_get '.kubermatic.imageOverride.repository' '')
@@ -834,8 +843,12 @@ provision_with_kubeone() {
 	export KKP_HOST=$(config_get '.kubermatic.domain')
 	export KKP_EMAIL=$(config_get '.kubermatic.email')
 
+	# SKIP_INFRA env var overrides the config default when set to a non-empty value.
 	local skip_infra=false
 	if config_enabled '.skipInfra'; then
+		skip_infra=true
+	fi
+	if [ -n "${SKIP_INFRA:-}" ]; then
 		skip_infra=true
 	fi
 
@@ -903,7 +916,11 @@ provision_with_kubeone() {
 	fi
 
 	# Update Route53 DNS records directly (replaces ExternalDNS)
-	if ! update_route53_dns_records "$KKP_HOST" "kubermatic"; then
+	local gateway_api_enabled=false
+	if config_enabled '.features.gatewayAPI'; then
+		gateway_api_enabled=true
+	fi
+	if ! update_route53_dns_records "$KKP_HOST" "kubermatic" "" "$gateway_api_enabled"; then
 		error "Failed to update Route53 DNS records"
 		exit 1
 	fi
