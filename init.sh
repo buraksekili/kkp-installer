@@ -654,6 +654,11 @@ spec:
       spec:
         aws:
           region: eu-central-1
+    byo-europe-west3-c:
+      country: DE
+      location: Frankfurt
+      spec:
+        bringyourown: {}
 EOF
 
 	log "Installing KKP Master Cluster on KubeOne cluster..."
