@@ -510,15 +510,14 @@ prepare_kkp_configs_kubeone() {
 			yq eval ".kubermaticOperator.image.tag = \"$image_tag\"" -i "$KKP_FILES_DIR/helm-master-gateway.yaml"
 		fi
 
-		# KKP component images managed by the operator
-		yq eval ".spec.api.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
+		# KKP component images managed by the operator.
+		# NOTE: spec.api is intentionally NOT overridden. The kubermatic-api binary
+		# ships in the dashboard image (quay.io/kubermatic/dashboard-ee), not the
+		# kubermatic-ee image. Overriding it with the kubermatic-ee repo makes the
+		# api pod crash with "kubermatic-api: executable file not found in $PATH".
 		yq eval ".spec.seedController.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
 		yq eval ".spec.masterController.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
 		yq eval ".spec.webhook.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
-		if [ -n "$image_tag" ] && [ "$image_tag" != "null" ]; then
-			# only spec.api supports dockerTag; other components derive the tag from kubermatic.version
-			yq eval ".spec.api.dockerTag = \"$image_tag\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
-		fi
 
 		log "Image override applied"
 	fi
