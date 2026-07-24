@@ -457,22 +457,59 @@ prepare_kkp_configs() {
 
 # install_kubermatic_installer_build builds kubermatic-installer + charts from the
 # source clone checked out by resolve_build_key, into KKP_ARTIFACTS_DIR.
+# resolve_git_version returns a valid semver string for GIT_VERSION, passed to
+# `make kubermatic-installer` so the binary's Versions.GitVersion parses. The installer
+# calls semver MustParse on this at startup (validation.go:65); a bare commit SHA
+# (produced by `git describe --always` when no v* tag is reachable, e.g. a release-branch
+# tip ahead of its last tag) would panic. Prefer git describe when it yields a tag-based
+# version; otherwise synthesize <major>.<minor>.0-dev from a release/vX.Y ref.
+resolve_git_version() {
+	local cloneDir="$1"
+	local ref="$2"
+
+	local described
+	described=$(git -C "$cloneDir" describe --tags --always --match='v*' 2>/dev/null || echo "")
+	# describe output starting with "v" and a digit is tag-based (valid semver or prerelease).
+	if [[ "$described" =~ ^v[0-9] ]]; then
+		echo "$described"
+		return
+	fi
+
+	# no reachable tag: synthesize from a release/vMAJOR.MINOR ref.
+	if [[ "$ref" =~ ^release/v([0-9]+)\.([0-9]+)$ ]]; then
+		echo "v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.0-dev"
+		return
+	fi
+
+	# last resort: a clearly-dev semver so MustParse does not panic.
+	echo "v0.0.0-dev"
+}
+
 install_kubermatic_installer_build() {
-	local cloneDir
+	local cloneDir ref
 	cloneDir=$(config_get '.kubermatic.source.cloneDir' '../kubermatic')
+	ref=$(config_get '.kubermatic.source.ref')
 
 	if ! command -v go >/dev/null 2>&1; then
 		error "Go toolchain not found. Install Go to build kubermatic-installer from source."
 		return 1
 	fi
 
-	log "Building kubermatic-installer from $cloneDir at commit $RESOLVED_COMMIT"
+	local git_version
+	git_version=$(resolve_git_version "$cloneDir" "$ref")
+	log "Building kubermatic-installer from $cloneDir at commit $RESOLVED_COMMIT (GIT_VERSION=$git_version)"
 
 	pushd "$cloneDir" >/dev/null || {
 		error "cloneDir '$cloneDir' not found"
 		return 1
 	}
-	if ! KUBERMATIC_EDITION="$KKP_EDITION" make kubermatic-installer; then
+	# pass GIT_VERSION as a make argument, not an env var: the Makefile uses
+	# `GIT_VERSION = $(shell git describe ...)` (plain assignment), which ignores
+	# an env override. On a shallow clone or an untagged commit, git describe hits
+	# --always and yields a bare SHA, which panics the installer's semver MustParse
+	# (validation.go:65). A make command-line arg overrides even a `=` assignment,
+	# so resolve_git_version's valid semver actually takes effect.
+	if ! KUBERMATIC_EDITION="$KKP_EDITION" make kubermatic-installer GIT_VERSION="$git_version"; then
 		error "Failed to build kubermatic-installer"
 		popd >/dev/null || return 1
 		return 1
@@ -733,13 +770,33 @@ prepare_kkp_configs_kubeone() {
 		# imageOverride absent and source set: derive a coherent image set from the commit.
 		# controllers inherit the operator tag at runtime, so pinning the operator tag
 		# (the resolved commit) pins every component.
+		# use the FULL sha (RESOLVED_COMMIT) as the image tag, matching what kubermatic CI
+		# pushes to quay (KUBERMATICDOCKERTAG = git rev-parse HEAD for untagged commits).
+		# BUILD_KEY is the short sha, kept short only for the cache dir name; quay has no
+		# :<short-sha> tag, so deploying it would ImagePullBackOff.
 		image_repo="quay.io/kubermatic/kubermatic-${KKP_EDITION}"
-		image_tag="$BUILD_KEY"
-		log "imageOverride absent; deriving images from source commit $BUILD_KEY"
+		image_tag="$RESOLVED_COMMIT"
+		log "imageOverride absent; deriving images from source commit $RESOLVED_COMMIT"
 	fi
 
 	if [ -n "$image_repo" ]; then
 		apply_image_override "$image_repo" "$image_tag"
+	fi
+
+	# dashboard (api + ui) image tag: the dashboard ships in a SEPARATE repo
+	# (quay.io/kubermatic/dashboard-<edition>, built from kubermatic/dashboard),
+	# which is NOT tagged with the kubermatic commit sha we pin the operator to.
+	# without this, the api pod defaults to versions.KubermaticContainerTag (the
+	# kubermatic sha -> ImagePullBackOff) and ui defaults to the operator's
+	# uiContainerTag (NA when built by init.sh). pin both to a released dashboard
+	# tag for the branch, e.g. v2.30.5. the operator honors spec.{api,ui}.dockerTag
+	# over its baked-in defaults (api.go:250, ui.go:58).
+	local dashboard_tag
+	dashboard_tag=$(config_get '.kubermatic.dashboardTag' '')
+	if [ -n "$dashboard_tag" ]; then
+		yq eval ".spec.api.dockerTag = \"$dashboard_tag\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
+		yq eval ".spec.ui.dockerTag = \"$dashboard_tag\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
+		log "Pinned dashboard (api + ui) image tag to $dashboard_tag"
 	fi
 
 	# --- helm-seed-shared.yaml ---
