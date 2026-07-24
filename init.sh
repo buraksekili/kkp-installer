@@ -26,6 +26,189 @@ declare -a required_secrets_kubeone=(
 	"VAULT_ROUTE53_PATH"
 )
 
+# --- source build helpers (deploy unreleased KKP from a git ref) ---
+
+source_is_enabled() {
+	config_has '.kubermatic.source.ref'
+}
+
+# Name of the git remote we create inside the kubermatic clone to point at source.repo.
+# We fetch from this remote (not the clone's origin) so a fork's origin — which may
+# lack the target branch — cannot cause a spurious fetch failure. This name is owned
+# by the installer and not user-configurable; ensure_source_clone creates/corrects it.
+# The kkp-installer- prefix makes collisions with a user's own remote names unlikely.
+readonly SOURCE_REMOTE="kkp-installer-source"
+
+ensure_source_clone() {
+	local repo="$1"
+	local cloneDir="$2"
+
+	if [ ! -d "$cloneDir/.git" ]; then
+		if [ -e "$cloneDir" ]; then
+			error "cloneDir '$cloneDir' exists but is not a git repository"
+			return 1
+		fi
+
+		log "Cloning $repo into $cloneDir"
+		if ! git clone "https://github.com/${repo}.git" "$cloneDir"; then
+			error "Failed to clone $repo into $cloneDir"
+			return 1
+		fi
+	fi
+
+	# point a dedicated remote at source.repo so fetches don't depend on the clone's
+	# origin (which may be a fork lacking the target branch). set-url is idempotent:
+	# it creates the remote if missing, and corrects it if it points elsewhere.
+	local upstream_url="https://github.com/${repo}.git"
+	if ! git -C "$cloneDir" remote set-url "$SOURCE_REMOTE" "$upstream_url" 2>/dev/null; then
+		if ! git -C "$cloneDir" remote add "$SOURCE_REMOTE" "$upstream_url"; then
+			error "Failed to configure remote '$SOURCE_REMOTE' in $cloneDir"
+			return 1
+		fi
+	fi
+
+	# if the clone is a partial clone (filter=blob:none etc.), git lazily fetches
+	# missing blobs from the promisor remote during checkout, which is origin by
+	# default. when origin is a fork (or any repo lacking the ref), that fails.
+	# repoint the promisor to the upstream remote so lazy fetches reach source.repo.
+	configure_partial_clone_promisor "$cloneDir" "$SOURCE_REMOTE"
+}
+
+# configure_partial_clone_promisor repoints a partial clone's promisor remote to
+# $remote so lazy blob fetches reach source.repo instead of the clone's origin
+# (which may be a fork). no-op for a full clone, which has no partialClone extension.
+configure_partial_clone_promisor() {
+	local cloneDir="$1"
+	local remote="$2"
+
+	local current
+	current=$(git -C "$cloneDir" config --get extensions.partialClone 2>/dev/null || echo "")
+	if [ -z "$current" ] || [ "$current" = "$remote" ]; then
+		return 0
+	fi
+
+	git -C "$cloneDir" config extensions.partialClone "$remote"
+	git -C "$cloneDir" config "remote.${remote}.promisor" true
+}
+
+# is_git_sha returns success when $1 looks like a git commit SHA (hex, >=7 chars).
+is_git_sha() {
+	[[ "$1" =~ ^[0-9a-fA-F]{7,}$ ]]
+}
+
+sync_source_ref() {
+	local cloneDir="$1"
+	local ref="$2"
+
+	# A raw commit SHA cannot be fetched directly over HTTPS
+	# ("couldn't find remote ref <sha>"). For SHAs, refresh all refs so the commit is
+	# reachable if it exists on any branch/tag, then checkout by SHA. Branch/tag refs
+	# are fetched by name. Always fetch from the dedicated upstream remote so a fork's
+	# origin (which may lack the branch) does not cause a spurious failure.
+	if is_git_sha "$ref"; then
+		log "Updating refs in $cloneDir to resolve commit $ref"
+		if ! git -C "$cloneDir" fetch "$SOURCE_REMOTE"; then
+			error "Failed to fetch from $SOURCE_REMOTE while resolving commit '$ref'"
+			return 1
+		fi
+	else
+		log "Fetching ref '$ref' into $cloneDir"
+		if ! git -C "$cloneDir" fetch "$SOURCE_REMOTE" "$ref"; then
+			error "Failed to fetch ref '$ref' from $SOURCE_REMOTE"
+			return 1
+		fi
+	fi
+
+	# checkout FETCH_HEAD: it always points at what was just fetched from
+	# $SOURCE_REMOTE, so resolution does not depend on local/origin tracking refs
+	# (a fork's origin may not have the branch). detach quietly; the detached-HEAD
+	# notice is noise, real errors still surface via the exit code.
+	if ! git -C "$cloneDir" checkout FETCH_HEAD 2>/dev/null; then
+		error "Failed to checkout ref '$ref' in $cloneDir"
+		return 1
+	fi
+}
+
+# resolve_build_key sets BUILD_KEY and KKP_ARTIFACTS_DIR.
+# BUILD_KEY is the resolved commit short SHA for source builds, or v<version>
+# for the released download path. KKP_ARTIFACTS_DIR caches the binary + charts
+# per build key, separate from KKP_FILES_DIR (prepared configs, regenerated).
+resolve_build_key() {
+	if source_is_enabled; then
+		local repo cloneDir ref
+		repo=$(config_get '.kubermatic.source.repo' 'kubermatic/kubermatic')
+		cloneDir=$(config_get '.kubermatic.source.cloneDir' '../kubermatic')
+		ref=$(config_get '.kubermatic.source.ref')
+
+		if ! ensure_source_clone "$repo" "$cloneDir"; then
+			return 1
+		fi
+		if ! sync_source_ref "$cloneDir" "$ref"; then
+			return 1
+		fi
+
+		# declare separately so a failed rev-parse is not masked by export
+		local full_sha short_sha
+		full_sha=$(git -C "$cloneDir" rev-parse HEAD) || {
+			error "Failed to resolve commit for ref '$ref'"
+			return 1
+		}
+		short_sha=$(git -C "$cloneDir" rev-parse --short HEAD) || {
+			error "Failed to resolve short commit for ref '$ref'"
+			return 1
+		}
+		export RESOLVED_COMMIT="$full_sha"
+		export BUILD_KEY="$short_sha"
+		log "Resolved source ref '$ref' -> commit $RESOLVED_COMMIT (key: $BUILD_KEY)"
+	else
+		export RESOLVED_COMMIT=""
+		export BUILD_KEY="v${KKP_VERSION#v}"
+	fi
+
+	export KKP_ARTIFACTS_DIR="$KKP_FILES_DIR/$BUILD_KEY"
+	mkdir -p "$KKP_ARTIFACTS_DIR"
+}
+
+# export_kkp_env sets the KKP_* env vars that downstream functions (resolve_build_key,
+# install_kubermatic_installer_build, apply_image_override) read from the environment.
+# Called by both provisioning paths so the build path works under either method.
+export_kkp_env() {
+	local version edition host email
+	version=$(config_get '.kubermatic.version')
+	edition=$(config_get '.kubermatic.edition' 'ee')
+	host=$(config_get '.kubermatic.domain')
+	email=$(config_get '.kubermatic.email')
+
+	export KKP_VERSION="$version"
+	export KKP_EDITION="$edition"
+	export KKP_HOST="$host"
+	export KKP_EMAIL="$email"
+}
+
+# apply_image_override rewrites the operator image (helm values) and the controller
+# component repos (KubermaticConfiguration CR) to the given repo/tag.
+# spec.api is intentionally NOT overridden: the kubermatic-api binary ships in the
+# dashboard image (quay.io/kubermatic/dashboard-ee), so overriding its repo crashes
+# the api pod. The operator tag propagates to the controllers at runtime.
+apply_image_override() {
+	local repo="$1"
+	local tag="$2"
+
+	local helm_values="$KKP_FILES_DIR/helm-master-gateway.yaml"
+	local kkp_cfg="$KKP_FILES_DIR/kubermatic.yaml"
+
+	yq eval ".kubermaticOperator.image.repository = \"$repo\"" -i "$helm_values"
+	if [ -n "$tag" ]; then
+		yq eval ".kubermaticOperator.image.tag = \"$tag\"" -i "$helm_values"
+	fi
+
+	yq eval ".spec.seedController.dockerRepository = \"$repo\"" -i "$kkp_cfg"
+	yq eval ".spec.masterController.dockerRepository = \"$repo\"" -i "$kkp_cfg"
+	yq eval ".spec.webhook.dockerRepository = \"$repo\"" -i "$kkp_cfg"
+
+	log "Applied image override: repo=$repo tag=${tag:-<chart default>}"
+}
+
 validate_creds_file() {
 	k8sCreds=${K8C_CREDS:-".k8c-creds.env"}
 
@@ -272,39 +455,61 @@ prepare_kkp_configs() {
 	success "Files prepared successfully"
 }
 
-install_kubermatic_installer() {
-	log "Checking for kubermatic-installer availability for $KKP_VERSION..."
+# install_kubermatic_installer_build builds kubermatic-installer + charts from the
+# source clone checked out by resolve_build_key, into KKP_ARTIFACTS_DIR.
+install_kubermatic_installer_build() {
+	local cloneDir
+	cloneDir=$(config_get '.kubermatic.source.cloneDir' '../kubermatic')
 
-	# normalize KKP_VERSION by stripping 'v' prefix for comparison and URL construction
-	local normalized_kkp_version="${KKP_VERSION#v}"
-
-	if [[ -f "$KKP_FILES_DIR/kubermatic-installer" && -d "$KKP_FILES_DIR/charts" ]]; then
-		local installed_version
-		installed_version=$(get_kubermatic_installer_version "$KKP_FILES_DIR/kubermatic-installer")
-
-		if [[ "$installed_version" == "$normalized_kkp_version" ]]; then
-			log "Found kubermatic-installer v$installed_version in kkp-files directory (matches requested version)"
-			chmod +x "$KKP_FILES_DIR/kubermatic-installer"
-			success "Using kubermatic-installer from kkp-files directory"
-			export KUBERMATIC_BINARY="$KKP_FILES_DIR/kubermatic-installer"
-			return 0
-		fi
-
-		log "Found kubermatic-installer v$installed_version but v$KKP_VERSION is required. Downloading..."
-		rm -f "$KKP_FILES_DIR/kubermatic-installer"
-		rm -rf "$KKP_FILES_DIR/charts"
+	if ! command -v go >/dev/null 2>&1; then
+		error "Go toolchain not found. Install Go to build kubermatic-installer from source."
+		return 1
 	fi
 
-	local os=$(go env GOOS)
-	local arch=$(go env GOARCH)
+	log "Building kubermatic-installer from $cloneDir at commit $RESOLVED_COMMIT"
 
-	log "kubermatic-installer not found locally. Downloading KKP $KKP_VERSION ($KKP_EDITION edition) for $os/$arch..."
+	pushd "$cloneDir" >/dev/null || {
+		error "cloneDir '$cloneDir' not found"
+		return 1
+	}
+	if ! KUBERMATIC_EDITION="$KKP_EDITION" make kubermatic-installer; then
+		error "Failed to build kubermatic-installer"
+		popd >/dev/null || return 1
+		return 1
+	fi
+	popd >/dev/null || return 1
+
+	mkdir -p "$KKP_ARTIFACTS_DIR"
+	if ! cp "$cloneDir/_build/kubermatic-installer" "$KKP_ARTIFACTS_DIR/"; then
+		error "Failed to copy kubermatic-installer to $KKP_ARTIFACTS_DIR"
+		return 1
+	fi
+	if ! cp -r "$cloneDir/charts" "$KKP_ARTIFACTS_DIR/"; then
+		error "Failed to copy charts to $KKP_ARTIFACTS_DIR"
+		return 1
+	fi
+	chmod +x "$KKP_ARTIFACTS_DIR/kubermatic-installer"
+
+	success "Built kubermatic-installer into $KKP_ARTIFACTS_DIR"
+}
+
+# install_kubermatic_installer_download fetches the released kubermatic-installer
+# tarball for KKP_VERSION into KKP_ARTIFACTS_DIR (cached per build key).
+install_kubermatic_installer_download() {
+	# normalize KKP_VERSION by stripping 'v' prefix for URL construction
+	local normalized_kkp_version="${KKP_VERSION#v}"
+
+	local os arch
+	os=$(go env GOOS)
+	arch=$(go env GOARCH)
+
+	log "Downloading KKP $KKP_VERSION ($KKP_EDITION edition) for $os/$arch..."
 
 	local kkp_edition_str="kubermatic-$KKP_EDITION"
 	local download_url="https://github.com/kubermatic/kubermatic/releases/download/v${normalized_kkp_version}/${kkp_edition_str}-v${normalized_kkp_version}-${os}-${arch}.tar.gz"
-	local archive_path="$KKP_FILES_DIR/kkp-manifests/${kkp_edition_str}-${normalized_kkp_version}.tar.gz"
+	local archive_path="$KKP_ARTIFACTS_DIR/${kkp_edition_str}-${normalized_kkp_version}.tar.gz"
 
-	mkdir -p "$KKP_FILES_DIR/kkp-manifests"
+	mkdir -p "$KKP_ARTIFACTS_DIR"
 
 	log "Downloading from: $download_url"
 	if ! curl -L "$download_url" --output "$archive_path"; then
@@ -312,22 +517,44 @@ install_kubermatic_installer() {
 		return 1
 	fi
 
-	log "Extracting archive to kkp-manifests directory..."
-	if ! tar -xzf "$archive_path" -C "$KKP_FILES_DIR/kkp-manifests"; then
+	log "Extracting archive into $KKP_ARTIFACTS_DIR..."
+	if ! tar -xzf "$archive_path" -C "$KKP_ARTIFACTS_DIR"; then
 		error "Failed to extract kubermatic-installer archive"
 		return 1
 	fi
 
-	chmod +x "$KKP_FILES_DIR/kkp-manifests/kubermatic-installer"
-	cp "$KKP_FILES_DIR/kkp-manifests/kubermatic-installer" "$KKP_FILES_DIR/kubermatic-installer"
-	cp -r "$KKP_FILES_DIR/kkp-manifests/charts" "$KKP_FILES_DIR/charts"
-	rm "$archive_path"
-	rm -rf "$KKP_FILES_DIR/kkp-manifests"
+	chmod +x "$KKP_ARTIFACTS_DIR/kubermatic-installer"
+	rm -f "$archive_path"
 
-	export KUBERMATIC_BINARY="$KKP_FILES_DIR/kubermatic-installer"
-	success "Successfully installed kubermatic-installer to $KUBERMATIC_BINARY"
+	success "Downloaded kubermatic-installer to $KKP_ARTIFACTS_DIR"
+}
 
-	local version=$("$KUBERMATIC_BINARY" version -s 2>/dev/null || echo "unknown")
+install_kubermatic_installer() {
+	log "Checking for kubermatic-installer at build key $BUILD_KEY..."
+
+	# cache hit: a runnable binary and matching charts already exist for this key
+	if [ -x "$KKP_ARTIFACTS_DIR/kubermatic-installer" ] && [ -d "$KKP_ARTIFACTS_DIR/charts" ]; then
+		log "Reusing cached build at $KKP_ARTIFACTS_DIR"
+		export KUBERMATIC_BINARY="$KKP_ARTIFACTS_DIR/kubermatic-installer"
+		return 0
+	fi
+
+	if source_is_enabled; then
+		if ! install_kubermatic_installer_build; then
+			error "Failed to build kubermatic-installer from source"
+			return 1
+		fi
+	else
+		if ! install_kubermatic_installer_download; then
+			error "Failed to download kubermatic-installer"
+			return 1
+		fi
+	fi
+
+	export KUBERMATIC_BINARY="$KKP_ARTIFACTS_DIR/kubermatic-installer"
+
+	local version
+	version=$("$KUBERMATIC_BINARY" version -s 2>/dev/null || echo "unknown")
 	log "Installed version: $version"
 }
 
@@ -349,7 +576,7 @@ install_kubermatic() {
 		--storageclass aws \
 		--mla-include-iap \
 		--migrate-gateway-api \
-		--charts-directory "$KKP_FILES_DIR/charts" \
+		--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 		--verbose; then
 		error "Failed to deploy KKP Master Cluster"
 		return 1
@@ -373,7 +600,7 @@ install_kubermatic() {
 		--kubeconfig "$KKP_FILES_DIR/kubeconfig-kubeone" \
 		--mla-include-iap \
 		--migrate-gateway-api \
-		--charts-directory "$KKP_FILES_DIR/charts" \
+		--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 		--verbose; then
 		error "Failed to deploy KKP Seed Cluster"
 		return 1
@@ -389,7 +616,7 @@ install_kubermatic() {
 		--config "$KKP_FILES_DIR/kubermatic.yaml" \
 		--helm-values "$KKP_FILES_DIR/values-seed-mla.yaml" \
 		--kubeconfig "$KKP_FILES_DIR/kubeconfig-kubeone" \
-		--charts-directory "$KKP_FILES_DIR/charts" \
+		--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 		--mla-include-iap \
 		--migrate-gateway-api \
 		--verbose; then
@@ -405,7 +632,7 @@ install_kubermatic() {
 		--config "$KKP_FILES_DIR/kubermatic.yaml" \
 		--helm-values "$KKP_FILES_DIR/values-seed-mla.yaml" \
 		--kubeconfig "$KKP_FILES_DIR/kubeconfig-kubeone" \
-		--charts-directory "$KKP_FILES_DIR/charts" \
+		--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 		--helm-timeout="10m" \
 		--mla-include-iap \
 		--migrate-gateway-api \
@@ -495,31 +722,24 @@ prepare_kkp_configs_kubeone() {
 		log "Set migrateGatewayAPI=true on seed and MLA helm values"
 	fi
 
-	# --- image override ---
-	local image_repo
-	image_repo=$(config_get '.kubermatic.imageOverride.repository' '')
-	if [ -n "$image_repo" ] && [ "$image_repo" != "null" ]; then
-		local image_tag
+	# --- image precedence: imageOverride wins, else derive from source ---
+	local image_repo=""
+	local image_tag=""
+
+	if config_has '.kubermatic.imageOverride.repository'; then
+		image_repo=$(config_get '.kubermatic.imageOverride.repository' '')
 		image_tag=$(config_get '.kubermatic.imageOverride.tag' '')
+	elif source_is_enabled; then
+		# imageOverride absent and source set: derive a coherent image set from the commit.
+		# controllers inherit the operator tag at runtime, so pinning the operator tag
+		# (the resolved commit) pins every component.
+		image_repo="quay.io/kubermatic/kubermatic-${KKP_EDITION}"
+		image_tag="$BUILD_KEY"
+		log "imageOverride absent; deriving images from source commit $BUILD_KEY"
+	fi
 
-		log "Applying image override: repository=$image_repo tag=${image_tag:-<derived from version>}"
-
-		# operator pod image (helm-master-gateway.yaml is the final file used by the installer)
-		yq eval ".kubermaticOperator.image.repository = \"$image_repo\"" -i "$KKP_FILES_DIR/helm-master-gateway.yaml"
-		if [ -n "$image_tag" ] && [ "$image_tag" != "null" ]; then
-			yq eval ".kubermaticOperator.image.tag = \"$image_tag\"" -i "$KKP_FILES_DIR/helm-master-gateway.yaml"
-		fi
-
-		# KKP component images managed by the operator.
-		# NOTE: spec.api is intentionally NOT overridden. The kubermatic-api binary
-		# ships in the dashboard image (quay.io/kubermatic/dashboard-ee), not the
-		# kubermatic-ee image. Overriding it with the kubermatic-ee repo makes the
-		# api pod crash with "kubermatic-api: executable file not found in $PATH".
-		yq eval ".spec.seedController.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
-		yq eval ".spec.masterController.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
-		yq eval ".spec.webhook.dockerRepository = \"$image_repo\"" -i "$KKP_FILES_DIR/kubermatic.yaml"
-
-		log "Image override applied"
+	if [ -n "$image_repo" ]; then
+		apply_image_override "$image_repo" "$image_tag"
 	fi
 
 	# --- helm-seed-shared.yaml ---
@@ -605,8 +825,6 @@ install_kubermatic_kubeone() {
 		return 1
 	fi
 
-	export KUBERMATIC_BINARY="$KKP_FILES_DIR/kubermatic-installer"
-
 	log "Installing KKP on KubeOne cluster..."
 
 	# build feature flags from config
@@ -668,7 +886,7 @@ EOF
 		--kubeconfig "$KUBECONFIG" \
 		"${storageclass_flag[@]}" \
 		"${feature_flags[@]}" \
-		--charts-directory "$KKP_FILES_DIR/charts" \
+		--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 		--verbose; then
 		error "Failed to deploy KKP Master"
 		return 1
@@ -700,7 +918,7 @@ EOF
 		--helm-values "$KKP_FILES_DIR/helm-seed-shared.yaml" \
 		--kubeconfig "$KUBECONFIG" \
 		"${feature_flags[@]}" \
-		--charts-directory "$KKP_FILES_DIR/charts" \
+		--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 		--verbose; then
 		error "Failed to deploy KKP Seed"
 		return 1
@@ -719,7 +937,7 @@ EOF
 			--helm-values "$KKP_FILES_DIR/values-seed-mla.yaml" \
 			--kubeconfig "$KUBECONFIG" \
 			"${feature_flags[@]}" \
-			--charts-directory "$KKP_FILES_DIR/charts" \
+			--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 			--verbose; then
 			error "Failed to deploy KKP Seed MLA"
 			return 1
@@ -740,7 +958,7 @@ EOF
 			--kubeconfig "$KUBECONFIG" \
 			--helm-timeout "$helm_timeout" \
 			"${feature_flags[@]}" \
-			--charts-directory "$KKP_FILES_DIR/charts" \
+			--charts-directory "$KKP_ARTIFACTS_DIR/charts" \
 			--verbose; then
 			error "Failed to deploy KKP UserCluster MLA"
 			return 1
@@ -753,6 +971,16 @@ EOF
 
 provision_with_kkp() {
 	log "Using KKP-within-KKP provisioning method"
+
+	# set env vars that downstream functions still read from env
+	export_kkp_env
+
+	# resolve the build key (resolved commit or v<version>) so install_kubermatic_installer
+	# and the deploy step have KKP_ARTIFACTS_DIR set, matching the kubeone path.
+	if ! resolve_build_key; then
+		error "Failed to resolve build key"
+		exit 1
+	fi
 
 	# if SKIP_CLUSTER_CREATION is set, we need proper K8C_CLUSTER_ID to be set
 	# if K8C_CLUSTER_ID is not set, thrown an error
@@ -842,10 +1070,15 @@ provision_with_kubeone() {
 	vault_login
 
 	# set env vars that downstream functions still read from env
-	export KKP_VERSION=$(config_get '.kubermatic.version')
-	export KKP_EDITION=$(config_get '.kubermatic.edition' 'ee')
-	export KKP_HOST=$(config_get '.kubermatic.domain')
-	export KKP_EMAIL=$(config_get '.kubermatic.email')
+	export_kkp_env
+
+	# resolve the build key (resolved commit or v<version>) before any work that
+	# depends on KKP_ARTIFACTS_DIR or the resolved commit. Runs regardless of
+	# skipInfra so the key is always known.
+	if ! resolve_build_key; then
+		error "Failed to resolve build key"
+		exit 1
+	fi
 
 	# SKIP_INFRA env var overrides the config default when set to a non-empty value.
 	local skip_infra=false

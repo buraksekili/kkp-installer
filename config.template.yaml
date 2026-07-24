@@ -1,0 +1,121 @@
+# config.yaml -- KKP Installer Configuration (kubeone method)
+# Copy this file to config.yaml and fill in your values. config.yaml is gitignored
+# because it holds host-specific values (domain, email, cluster name, ssh key).
+# Secrets stay in .k8c-creds.env (also gitignored).
+
+provisioningMethod: kubeone          # kubeone or kkp (default: kubeone)
+skipInfra: false # skip infrastructure provisioning (terraform/kubeone)
+
+kubermatic:
+  version: "2.30.5"
+  edition: ee
+  domain: your-domain.example.com
+  email: admin@example.com
+  exposeStrategy: Tunneling
+  storageClass: aws
+  # source: build kubermatic-installer + charts from a git ref instead of downloading
+  # the released tarball. Use this to deploy unreleased KKP (main, release/v2.XY,
+  # or any commit). Requires a local Go toolchain. See README "Deploying an
+  # Unreleased KKP Version".
+  # source:
+  #   ref: release/v2.30          # branch | tag | commit SHA
+  #   repo: kubermatic/kubermatic # default
+  #   cloneDir: ../kubermatic     # default; reused across runs
+  # imageOverride: point KKP at a custom container image. Takes precedence over
+  # source-derived images. When source is set and imageOverride is absent, images
+  # are derived from the resolved commit (quay.io/kubermatic/kubermatic-<edition>:<sha>).
+  # tag is optional; if omitted, the chart default tag (v<version>) is used.
+  # spec.api is never overridden (kubermatic-api ships in the dashboard image).
+  imageOverride:
+    repository: quay.io/kubermatic/kubermatic-ee
+    # tag: <commit-sha-or-version>
+
+features:
+  gatewayAPI: true
+  seedMLA: false
+  userClusterMLA: false
+  mlaIncludeIAP: false
+  appCatalog: false
+  verticalPodAutoscaler: false
+
+infrastructure:
+  clusterName: kkp-test
+  provider: aws
+  region: eu-central-1
+  vpcId: default
+  kubernetesVersion: "1.28.0"
+  controlPlane:
+    instanceType: t3.medium
+    volumeSize: 50
+  workers:
+    instanceType: r5.xlarge
+    volumeSize: 200
+    count: 3
+  sshPublicKeyFile: ~/.ssh/your_ssh_key.pub
+
+seedMLA:
+  enabled: false
+  values:
+    prometheus:
+      tsdb:
+        retentionTime: "1h"
+      backup:
+        enabled: false
+      containers:
+        prometheus:
+          resources:
+            requests:
+              cpu: "0.5"
+              memory: 500Mi
+      scraping:
+        blackBoxExporter:
+          enabled: false
+    alertmanager:
+      replicaCount: 1
+      persistence:
+        size: 4Gi
+    cortex:
+      alertmanager:
+        persistentVolume:
+          size: 4Gi
+      ingester:
+        persistentVolume:
+          size: 4Gi
+      store_gateway:
+        persistentVolume:
+          size: 4Gi
+      compactor:
+        persistentVolume:
+          size: 4Gi
+    loki-distributed:
+      ingester:
+        persistence:
+          claims:
+            - name: data
+              size: 4Gi
+              storageClass: kubermatic-fast
+      querier:
+        persistence:
+          size: 4Gi
+    loki: null
+    karma: null
+    promtail: null
+    kube-state-metrics: null
+    helm-exporter: null
+
+userClusterMLA:
+  enabled: false
+  values: {}
+  helmTimeout: 15m
+
+helmMaster:
+  enabled: true
+  values: {}
+
+helmSeed:
+  values:
+    minio:
+      storeSize: 25Gi
+
+timeout:
+  waitNodes: 15

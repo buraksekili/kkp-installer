@@ -77,6 +77,15 @@ config_enabled() {
   [[ "$value" == "true" ]]
 }
 
+# config_has returns success when a config path exists and is non-null.
+# use it instead of `[ -n "$v" ] && [ "$v" != "null" ]` at read sites.
+config_has() {
+  local path="$1"
+  local value
+  value=$(yq eval "${path} // null" "$CONFIG_YAML")
+  [ "$value" != "null" ]
+}
+
 extract_helm_overlay() {
   local section="$1"
   local output="$2"
@@ -97,6 +106,7 @@ export CONFIG_YAML
 export -f load_config
 export -f config_get
 export -f config_enabled
+export -f config_has
 export -f extract_helm_overlay
 
 api_request() {

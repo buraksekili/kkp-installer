@@ -3,6 +3,10 @@
 
 .k8c-creds.env
 .env
+
+# config.yaml holds host-specific values (domain, email, cluster name, ssh key).
+# use config.template.yaml as the example; copy to config.yaml and fill in.
+config.yaml
 kubeconfig*
 preset.yaml
 seed-mla.values.yaml

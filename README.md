@@ -66,6 +66,41 @@ PROVISIONING_METHOD=kubeone ./init.sh
 | KUBEONE_K8S_VERSION | Kubernetes version | 1.28.0 |
 | SSH_PUBLIC_KEY_FILE | SSH public key path | ~/.ssh/k8c_bs.pub |
 
+### Deploying an Unreleased KKP Version
+
+To deploy KKP from an unreleased commit (main, a release branch, or any commit),
+set `kubermatic.source` in config.yaml. The installer clones
+`kubermatic/kubermatic`, checks out the ref, and builds `kubermatic-installer` +
+the matching Helm charts locally. Requires a local Go toolchain.
+
+| Config | Result |
+|--------|--------|
+| neither | fully released KKP (default) |
+| `source` only | unreleased installer + charts; images derived from the resolved commit |
+| `imageOverride` only | released installer + charts; custom images |
+| both | `imageOverride` wins for images; `source` drives installer + charts |
+
+Image precedence: if `imageOverride` is set, it wins. Otherwise, when `source` is
+set, images are derived as `quay.io/kubermatic/kubermatic-<edition>:<commit-sha>`.
+
+Note: `spec.api` is never overridden, because the `kubermatic-api` binary ships in
+the dashboard image (`quay.io/kubermatic/dashboard-ee`), not the kubermatic image.
+
+Built artifacts are cached per commit under `kkp-files/<short-sha>/`. Delete old
+directories manually to reclaim disk.
+
+#### Source and Image Override fields
+
+These live under `kubermatic:` in config.yaml (not env vars):
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `source.ref` | branch, tag, or commit SHA to build from | (unset = released download) |
+| `source.repo` | git repo to clone | `kubermatic/kubermatic` |
+| `source.cloneDir` | local clone path (reused across runs) | `../kubermatic` |
+| `imageOverride.repository` | custom container image repository | (unset = derive from source, else chart default) |
+| `imageOverride.tag` | custom image tag | (unset = chart default `v<version>`) |
+
 ## TLS Certificate Management
 
 When using KubeOne provisioning, TLS certificates are backed up to `kkp-files/tls-backup.yaml`. This prevents hitting Let's Encrypt rate limits when rebuilding clusters.
@@ -77,15 +112,17 @@ The backup is automatically:
 ## Setup
 
 1. **Clone this repository:**
-2. **Copy the template secrets file:**
+2. **Copy the template config and secrets files:**
 
 ```bash
+cp config.template.yaml config.yaml   # host-specific config (gitignored)
 cp secrets.template.env .k8c-creds.env
 ```
 
-3. **Edit the credentials file with your values:**
+3. **Edit `config.yaml`** with your domain, version, and infrastructure settings.
+4. **Edit `.k8c-creds.env`** with your credentials.
 
-4. **Ensure you have a `seeds.yaml` file** in the current directory containing your Seed CR and Secret configuration.
+5. **Ensure you have a `seeds.yaml` file** in the current directory containing your Seed CR and Secret configuration.
 
 ## Environment Variables
 
@@ -161,6 +198,7 @@ K8C_CLUSTER_REPLICAS=3 ./init.sh
 
 - `init.sh`: Main initialization script
 - `utils.sh`: Utility functions used by init.sh
+- `config.template.yaml`: Template for config.yaml (host-specific, gitignored)
 - `remote/cluster-issuer.yaml`: Template for Let's Encrypt cluster issuer
 - `secrets.template.env`: Template for credentials file
 - `kkp-files/`: Directory created by the script to store KKP configuration files
