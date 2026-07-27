@@ -1,5 +1,6 @@
 # direnv configuration (may contain paths to secrets)
 .envrc
+.vault-creds.env
 
 .k8c-creds.env
 .env

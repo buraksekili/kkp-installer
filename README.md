@@ -21,6 +21,17 @@ For automatic credential loading, you can use [direnv](https://direnv.net/):
 
 Now AWS and Route53 credentials will be automatically loaded when you enter this directory.
 
+Credentials are cached to `.vault-creds.env` (gitignored) for one hour after the
+first fetch, so directory switches stay fast and do not hit Vault every time.
+To force a refresh, delete the cache and re-enter the directory:
+
+```bash
+rm .vault-creds.env
+```
+
+The TTL and cache path are overridable via the `VAULT_CACHE_TTL` (seconds) and
+`VAULT_CACHE` environment variables.
+
 Without direnv, the script fetches credentials from Vault internally using the same paths.
 
 ## Provisioning Methods
