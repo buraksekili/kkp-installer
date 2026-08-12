@@ -731,6 +731,15 @@ prepare_kkp_configs_kubeone() {
 		exit 1
 	fi
 
+	# must run before the helm-master-gateway.yaml copy below, otherwise the file the
+	# deploy commands actually read would miss the URIs
+	if kkp_version_ge "2.31"; then
+		if ! add_kubermatic_issuer_redirect_uris "$KKP_FILES_DIR/helm-master.yaml" "$kkp_domain"; then
+			error "Failed to add kubermaticIssuer redirect URIs"
+			exit 1
+		fi
+	fi
+
 	# if gateway API is enabled, inject gateway-specific fields into helm-master
 	# and write the result as helm-master-gateway.yaml (which deploy commands reference)
 	if config_enabled '.features.gatewayAPI'; then

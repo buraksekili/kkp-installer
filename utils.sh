@@ -929,6 +929,82 @@ get_kubermatic_installer_version() {
   parse_kubermatic_version "$version_output"
 }
 
+# kkp_version_ge - compares $KKP_VERSION against a MAJOR.MINOR target
+# Arguments:
+#   $1 - target version in MAJOR.MINOR form (e.g. "2.31")
+# Returns:
+#   0 when KKP_VERSION >= target, 1 otherwise
+# The prerelease suffix is stripped before comparing, so 2.31.0-alpha.1 counts as
+# 2.31 rather than sorting below it.
+kkp_version_ge() {
+  local target="$1"
+  local current="${KKP_VERSION#v}"
+  current="${current%%-*}"
+
+  local cur_major cur_minor tgt_major tgt_minor
+  IFS='.' read -r cur_major cur_minor _ <<< "$current"
+  IFS='.' read -r tgt_major tgt_minor _ <<< "$target"
+
+  # a non-numeric version (e.g. "unknown") cannot be ordered; treat as older
+  if ! [[ "$cur_major" =~ ^[0-9]+$ ]]; then
+    return 1
+  fi
+  if ! [[ "${cur_minor:-0}" =~ ^[0-9]+$ ]]; then
+    cur_minor=0
+  fi
+
+  if [ "$cur_major" -gt "$tgt_major" ]; then
+    return 0
+  fi
+  if [ "$cur_major" -lt "$tgt_major" ]; then
+    return 1
+  fi
+
+  [ "${cur_minor:-0}" -ge "${tgt_minor:-0}" ]
+}
+
+# add_kubermatic_issuer_redirect_uris - ensures the dashboard origin and its
+# /projects path are registered as redirectURIs on the kubermaticIssuer dex client.
+# Arguments:
+#   $1 - path to the helm master values file
+#   $2 - KKP domain (e.g. burak.lab.kubermatic.io)
+# KKP >= 2.31 routes dashboard login through kubermaticIssuer, so dex rejects the
+# callback with "Invalid redirect_uri" unless these two URIs are listed.
+# `unique` keeps this idempotent when the vault-stored file already has them.
+add_kubermatic_issuer_redirect_uris() {
+  local values_file="$1"
+  local domain="$2"
+
+  if [ ! -f "$values_file" ]; then
+    error "Helm master values file '$values_file' does not exist"
+    return 1
+  fi
+
+  if [ -z "$domain" ]; then
+    error "Domain is not set for kubermaticIssuer redirect URIs"
+    return 1
+  fi
+
+  # the new dex chart keeps the dex config nested under .dex, unlike the seed/MLA
+  # value files whose keys sit at the top level
+  local client_count
+  client_count=$(yq eval '[.dex.config.staticClients[] | select(.id == "kubermaticIssuer")] | length' "$values_file")
+  if [ "$client_count" = "0" ] || [ "$client_count" = "null" ]; then
+    error "No kubermaticIssuer staticClient found in $values_file"
+    return 1
+  fi
+
+  if ! yq eval "
+    (.dex.config.staticClients[] | select(.id == \"kubermaticIssuer\") | .redirectURIs)
+      |= ((. // []) + [\"https://$domain\", \"https://$domain/projects\"] | unique)
+  " -i "$values_file"; then
+    error "Failed to add kubermaticIssuer redirect URIs to $values_file"
+    return 1
+  fi
+
+  log "Added kubermaticIssuer redirect URIs: https://$domain and https://$domain/projects"
+}
+
 export -f fetch_aws_credentials_from_vault
 export -f fetch_route53_credentials_from_vault
 export -f generate_kubeone_tfvars
@@ -943,3 +1019,5 @@ export -f wait_for_lb_hostname
 export -f update_route53_dns_records
 export -f parse_kubermatic_version
 export -f get_kubermatic_installer_version
+export -f kkp_version_ge
+export -f add_kubermatic_issuer_redirect_uris
